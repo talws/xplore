@@ -172,36 +172,8 @@ def _utcnow() -> str:
                    .isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS articles (
-    url         TEXT PRIMARY KEY,      -- the resolved destination
-    title       TEXT,
-    text        TEXT,
-    word_count  INTEGER,
-    source      TEXT,                  -- direct | wayback | archiveph
-    snap_url    TEXT,                  -- where the copy actually came from
-    http_status TEXT,
-    status      TEXT,                  -- ok | botscreen | thin | failed | skipped
-    fetched_at  TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_articles_status ON articles(status);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS articles_fts USING fts5(
-    title, text, content='articles', content_rowid='rowid'
-);
-CREATE TRIGGER IF NOT EXISTS articles_ai AFTER INSERT ON articles BEGIN
-    INSERT INTO articles_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
-END;
-CREATE TRIGGER IF NOT EXISTS articles_ad AFTER DELETE ON articles BEGIN
-    INSERT INTO articles_fts(articles_fts, rowid, title, text)
-    VALUES ('delete', old.rowid, old.title, old.text);
-END;
-CREATE TRIGGER IF NOT EXISTS articles_au AFTER UPDATE ON articles BEGIN
-    INSERT INTO articles_fts(articles_fts, rowid, title, text)
-    VALUES ('delete', old.rowid, old.title, old.text);
-    INSERT INTO articles_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
-END;
-"""
+# One definition, in store.py, because the Store reads these tables too.
+from store import ARTICLES_SCHEMA as SCHEMA   # noqa: E402
 
 NOISE = ["script", "style", "noscript", "iframe", "svg", "canvas", "form",
          "nav", "header", "footer", "aside"]

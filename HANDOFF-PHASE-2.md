@@ -599,3 +599,193 @@ thing:
 - archive.today is exact-match on the address and CAPTCHA-gated even for a person.
 - Mneme: never `git clean -fdx` in `bookmarktool`, and never put a destructive command in a
   runnable code block.
+
+---
+
+## Supplement 4 — Step 0, workstreams A and B (14 September, evening)
+
+Numbers were measured on a `backup()` copy of the live database taken at 20:10, or on the
+live server after redeploy.
+
+### Step 0
+
+`origin/main` is `0311edd`, the same as local, so the first push happened. **Everything below is
+uncommitted:** the owner has not asked for a commit. `git status` shows code, docs and assets
+only. Modified: `store.py`, `server.py`, `capture.py`, `archive_links.py`,
+`extension/{manifest.json,bridge.js,background.js,icon-16/48/128.png}`. New: `ui/`,
+derived files in `assets/`, `xplore.pyw`, `create-shortcut.ps1`. The new log
+`xplore-window.log` is covered by `*.log`.
+
+### A. New UI: done, served at `/`
+
+The classic UI moved to `/classic`. The new one is `ui/index.html` plus `xplore.css`,
+`app.js` (shell, theme, keyboard, URL hash), `library.js`, `detail.js`, `recover.js`,
+`render.js`, `reader.js` and `util.js`. There is no build step and no CDN.
+
+- **Layout, following Mneme:**
+  - header: logo, Library/Recover tabs (Related is present but hidden until C1), one search box,
+    live stats;
+  - a dark facet sidebar (250 px): time frame, archive state, content type plus threads,
+    topics, tags, language and authors;
+  - the results;
+  - a detail panel (360 px).
+- **(a) Index.** Each card shows:
+  - the author, and when it was bookmarked or posted;
+  - the opener, with a "thread · N" badge;
+  - the quoted post, with its own links;
+  - every link with its archive state.
+
+  An archived link opens `/article` in an in-app reader overlay; a modifier-click opens a new
+  tab. A missing link has "recover →", which opens Recover filtered to that site and scrolled
+  to the article.
+- **(b) Time frame.** 24 h / 3 d / 7 d / month / all / custom. The basis follows the sort. A
+  notice and a sidebar note show the undated count.
+- **(c) Search.** One box searches:
+  - the tweet itself;
+  - its thread;
+  - the quoted post;
+  - the archived text of its links, and of the quoted post's links.
+
+  Each hit says where it matched, for example "Matched only in the linked article", with a
+  highlighted article snippet. Sort is newest or oldest, by bookmarked or posted date.
+- **Detail panel:**
+  - thread parts;
+  - the quoted post;
+  - links with 1,200-character excerpts;
+  - photos (remote thumbnails, so they need the network);
+  - topic, editable against a datalist of the taxonomy (writes `topic_user`);
+  - tags;
+  - language, engagement and quoted-by;
+  - "Remove…", with undo.
+- **Keyboard:** `/` focuses search, `j`/`k` move between cards, Enter opens one, Esc closes
+  the reader or the panel.
+- **Theme:** a toggle cycling system, light and dark, with a dark logo variant.
+- **Narrow widths:** the sidebar becomes a drawer below 880 px, and the detail panel goes full
+  width below 640 px. At 375 px there is no horizontal overflow; this was measured, because the
+  browser pane could not take screenshots while hidden.
+- **Gate:** a, b and c work on the live data, checked in the browser, in light and dark, with
+  no console errors.
+
+### Server and store changes behind A
+
+- **Search went from 7–10 s to under 0.5 s.** Joining articles on
+  `COALESCE(resolved_url, expanded_url)` cannot use an index. An expression index on that
+  exact expression was tried and the planner still scanned `links`. `find()` now makes two
+  indexed probes instead: `resolved_url IN (hits)`, and `expanded_url IN (hits)` where
+  `resolved_url IS NULL`. Counts were identical on four test queries.
+  - Timings: "gaza" 7.1 → 0.07 s; "iran OR israel" 10.2 → 0.08 s.
+  - `capture.py`'s worklist still uses the old join. It takes 0.4–0.7 s over about 1,400 rows,
+    which is fine for now.
+- **`find()`:**
+  - new parameters: `scope` (bookmarks by default, undated, all), `language`, `contentType`,
+    `status`, `dateAdded` (Mneme's buckets), `thread`, `order`;
+  - each result carries `opener`, `thread_count`, `quoted` (with its links), `media` counts,
+    `contentType`, `matchedIn`, and per link `kind`, `host` and `snippet`;
+  - `Uncategorised` filters to rows with no topic;
+  - input FTS5 rejects is quoted word by word: `U.S.`, `don't` and `#Gaza` used to return 500.
+- **Bug fixed: the 24-hour window.** Stored dates look like `2026-09-13T10:00:00Z`, but
+  `datetime('now')` returns `2026-09-13 12:00:00`. Comparing the two strings (`T` against a
+  space) let "24 hours" admit most of the previous day.
+- **New endpoints:**
+  - `GET /api/tweets/<id>` for the detail panel;
+  - `GET /api/facets`: Mneme's shape (`topics`, `taxonomy`, `dateAdded`, `total`,
+    value/count pairs) plus Xplore's facets, cached for 30 s;
+  - `GET /api/bookmarks`: Mneme's contract, collection `x`. It pages with `limit` (default
+    1000, max 5000) and `offset`, and returns `total`. The record mapping is `as_mneme()` in
+    `store.py`.
+- **`/api/stats`** gained `bookmarks`, `quotedOnly`, `articles` and `articleWords`, and
+  `undated` was redefined (below). `/api/ingest`'s `undated`, which the extension reads, is
+  unchanged.
+- **Concurrency bug, older than this work, now fixed.** One SQLite connection was shared by
+  Flask's request threads. Overlapping requests failed with
+  `sqlite3.InterfaceError: bad parameter or other API misuse`. The new UI's parallel requests
+  at page load made one in six fail, and **an extension ingest landing at the same moment would
+  have been lost the same way.** `Store.db` is now a connection per thread.
+  - Stress test: 66 requests, 16 in parallel, 0 failures, on the copy and on the live server.
+- **Fresh-database regression, caught by `test_parse.py` and fixed.** The Store now creates
+  the articles schema, which moved to `store.ARTICLES_SCHEMA` (`archive_links.py` imports it),
+  and `enrich_links.py`'s link columns.
+- **Housekeeping:**
+  - `WORKLIST_STATUSES` now has one definition, in `store.py`; `capture.py` imports it;
+  - the migration adds `idx_tweets_quoted`;
+  - the server banner and notifications say Xplore. `/api/ping` still says
+    `service: xcollector`, which the extension checks.
+
+### Definitions, settled with data
+
+| | |
+|---|---|
+| Bookmark | `sort_index IS NOT NULL`: **23,049** |
+| Quoted only | no sortIndex, quoted by *any* row: **4,319**, 11 of them only by other quoted tweets |
+| Undated | no sortIndex, not quoted, not a thread part: **55** (§1 said 47, before the latest captures). Whether to tombstone them is still the owner's decision |
+| contentType (overlapping) | article links 4,236 · video 4,631 · images 8,003 · text only 7,353 |
+| Archive state | archived 3,519 · to recover 808 · not archived yet 9 · no links 18,595 · threads 1,920 |
+
+### Known limits found
+
+- **Greek search is accent-sensitive.** FTS5's unicode61 tokenizer strips diacritics from
+  Latin script only: "Τσίπρας" finds 21 and "τσιπρας" finds 0. Fixing it needs an
+  accent-folded copy of the text in the index, which rebuilds both FTS tables, so it was not
+  done here. Meanwhile **C2's query expansion should generate the accented forms.**
+  Highlighting in the UI already ignores accents.
+- **Facets are slow to build:** 1.7 s alone, about 4 s under load. They are cached for 30 s,
+  so a topic or tag edit can take that long to show in the counts.
+- **Clearing a topic override** in the panel does not clear `topic_user`, because `set_topic`
+  uses COALESCE. This predates this work.
+- **The worklist still holds rows keyed by unresolved `t.co` links** (3 under the "t.co"
+  site), as well as the `bit.ly` group (27). Their archive.today links are built from the
+  shortener, which archive.today will not hold. They need resolving first, as `trib.al` did.
+- **The API test is not in the repo.** It lived in the session scratchpad: 61 checks against a
+  database copy through Flask's test client. Worth adding as `test_api.py --db <copy>`.
+
+### B. Desktop launcher: done
+
+- **Installed** into the system Python 3.14, with the owner's approval: `pywebview` 6.2.1 and
+  `pythonnet` 3.1.0 (which has a cp314 wheel).
+- **`xplore.pyw`:**
+  - one instance: a named mutex, and a second launch brings the window forward;
+  - starts the server through `start-collector.vbs` when `/api/ping` fails, and shows a logo
+    splash (light or dark) while it binds;
+  - Xplore icon and its own AppUserModelID;
+  - web storage in `%USERPROFILE%\.xplore\webview`, non-private so the theme persists.
+    pywebview defaults to private mode, and to `text_select=False`;
+  - falls back to an Edge `--app` window if the embedded window fails. Its log is
+    `xplore-window.log`.
+- **`create-shortcut.ps1`** made `Desktop\Xplore.lnk`. It targets the real `pythonw.exe`, not
+  the WindowsApps alias.
+- **Gate verified:**
+  - from a cold start (server stopped), the server bound in **15 s** and the UI loaded, with no
+    console window;
+  - a second launch exited, leaving one window and the same server PID;
+  - closing the window leaves the server running.
+
+  Not checked: how the taskbar icon looks.
+- **Links from the window:** pywebview opens `target=_blank` links in the default browser.
+  That is what makes "Open on archive.today" work, since the capture extension lives in
+  Chrome. If the default browser is not Chrome, capture-on-view needs the page opened in
+  Chrome.
+- The login auto-start is unchanged.
+
+### Brand
+
+- **New in `assets/`:**
+  - `xplore-icon-master.png` (534×534, transparent);
+  - `xplore.ico` (16–256);
+  - `favicon-32.png` and `icon-192.png`;
+  - `xplore-logo-light.png` and `xplore-logo-dark.png` (white wordmark), with header-sized
+    `-h64` copies.
+- **How they were made:** a flood fill with un-blending from white; the wordmark was
+  colour-keyed so its letter counters clear. The originals are untouched. The build script was
+  not kept in the repo.
+- **Extension:** renamed "Xplore" (manifest 0.2.0, panel, notifications), with new icons and
+  no permission change.
+
+### Deployed, and what the owner needs to do
+
+- The live server was restarted on the new code at 20:24 and again at about 20:35. It had been
+  idle since 14:18, so no scan was interrupted. It now runs through `start-collector.vbs` and
+  logs to **`server.log`** (not `server-8502.log`).
+- **Owner:**
+  1. Reload the extension, then reload the x.com tab.
+  2. Decide on committing this work and on tombstoning the 55 undated rows.
+- **Next:** C1, as planned.

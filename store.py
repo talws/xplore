@@ -27,11 +27,196 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import datetime
+import threading
+import time
+import unicodedata
 from typing import Iterable
+from urllib.parse import quote, urlsplit
 
 SCHEMA_VERSION = 1
+
+
+# ── Shared vocabulary: find(), facets() and the Mneme-shaped read API ────────
+
+# Articles still missing, i.e. the Recover worklist. capture.py imports this,
+# so "unrecovered" means the same thing in the worklist and in the facets.
+WORKLIST_STATUSES = ("failed", "thin", "botscreen")
+
+# What a row is. Only a timeline entry carries a sortIndex, so that is the test
+# for "is a bookmark". A row without one that some bookmark quotes is stored for
+# the quote. A row without one that nothing quotes was not seen on the last full
+# walk of the timeline, and was probably removed from bookmarks on X.
+SCOPES = {
+    "bookmarks": "t.sort_index IS NOT NULL",
+    # Quoted by any row, not just by a bookmark: a quote of a quote is stored
+    # too (11 on 14 Sep). One unquoted row was a thread part.
+    "undated": ("t.sort_index IS NULL "
+                "AND NOT EXISTS (SELECT 1 FROM tweets b WHERE b.quoted_id = t.id) "
+                "AND NOT EXISTS (SELECT 1 FROM thread_parts p WHERE p.id = t.id)"),
+    "all": "1 = 1",
+}
+
+# The archived-article store. Created by the Store as well as by
+# archive_links.py (which imports this), because find(), facets() and stats()
+# read it: a brand-new database must not fail before the first archive pass.
+ARTICLES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS articles (
+    url         TEXT PRIMARY KEY,      -- the resolved destination
+    title       TEXT,
+    text        TEXT,
+    word_count  INTEGER,
+    source      TEXT,                  -- direct | wayback | archiveph | view | transcript
+    snap_url    TEXT,                  -- where the copy actually came from
+    http_status TEXT,
+    status      TEXT,                  -- ok | botscreen | thin | failed | skipped
+    fetched_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_articles_status ON articles(status);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS articles_fts USING fts5(
+    title, text, content='articles', content_rowid='rowid'
+);
+CREATE TRIGGER IF NOT EXISTS articles_ai AFTER INSERT ON articles BEGIN
+    INSERT INTO articles_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS articles_ad AFTER DELETE ON articles BEGIN
+    INSERT INTO articles_fts(articles_fts, rowid, title, text)
+    VALUES ('delete', old.rowid, old.title, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS articles_au AFTER UPDATE ON articles BEGIN
+    INSERT INTO articles_fts(articles_fts, rowid, title, text)
+    VALUES ('delete', old.rowid, old.title, old.text);
+    INSERT INTO articles_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
+END;
+"""
+
+_LINKED = ("FROM links l LEFT JOIN articles a "
+           "ON a.url = COALESCE(l.resolved_url, l.expanded_url) WHERE l.tweet_id = t.id")
+_X_HOST = "(" + " OR ".join(
+    f"COALESCE(l.resolved_url, l.expanded_url) LIKE '%://{h}/%'"
+    for h in ("x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com")) + ")"
+
+# Mneme's `contentType`, for a bookmark. Overlapping: a tweet with a photo and
+# an article link counts under both. primary_type() picks one for display.
+CONTENT_TYPES = {
+    "article": (f"EXISTS (SELECT 1 {_LINKED} AND COALESCE(a.source, '') <> 'transcript' "
+                f"AND COALESCE(a.status, '') NOT IN ('skipped', 'video') AND NOT {_X_HOST})"),
+    "video": ("(EXISTS (SELECT 1 FROM media m WHERE m.tweet_id = t.id "
+              "AND m.kind IN ('video', 'animated_gif')) "
+              f"OR EXISTS (SELECT 1 {_LINKED} AND (a.source = 'transcript' OR a.status = 'video')))"),
+    "image": "EXISTS (SELECT 1 FROM media m WHERE m.tweet_id = t.id AND m.kind = 'photo')",
+    "text": ("NOT EXISTS (SELECT 1 FROM links l WHERE l.tweet_id = t.id) "
+             "AND NOT EXISTS (SELECT 1 FROM media m WHERE m.tweet_id = t.id)"),
+}
+
+_ARCHIVED = f"EXISTS (SELECT 1 {_LINKED} AND a.status = 'ok')"
+_WL = ", ".join(f"'{s}'" for s in WORKLIST_STATUSES)
+
+# Can the linked text be read here? Mneme's `status`, for a bookmark's links.
+STATUSES = {
+    "archived": _ARCHIVED,
+    "unrecovered": f"NOT {_ARCHIVED} AND EXISTS (SELECT 1 {_LINKED} AND a.status IN ({_WL}))",
+    "pending": f"NOT {_ARCHIVED} AND EXISTS (SELECT 1 {_LINKED} AND a.url IS NULL AND NOT {_X_HOST})",
+    "nolinks": "NOT EXISTS (SELECT 1 FROM links l WHERE l.tweet_id = t.id)",
+}
+
+ARTICLE_HITS = ("SELECT a.url FROM articles_fts af JOIN articles a ON a.rowid = af.rowid "
+                "WHERE articles_fts MATCH :q")
+
+LIST_COLS = """t.id, t.url, t.author_handle, t.author_name, t.created_at, t.text,
+       t.quoted_text, t.quoted_id, t.quoted_handle, t.truncated, t.is_thread,
+       t.thread_done, t.lang, t.sort_index IS NOT NULL AS is_bookmark"""
+
+# Mneme's date facet vocabulary (version2/facets.py date_bucket).
+DATE_ORDER = ["Today", "Past week", "Past month", "Past 3 months", "Past year"]
+UNCATEGORISED = "Uncategorised"
+
+
+def bucket_sql(col: str) -> str:
+    """Mneme's date_bucket() as a SQL expression over an ISO timestamp column."""
+    days = f"CAST(julianday('now') - julianday({col}) AS INTEGER)"
+    return (f"CASE WHEN {col} IS NULL THEN 'Unknown' "
+            f"WHEN {days} <= 0 THEN 'Today' WHEN {days} <= 7 THEN 'Past week' "
+            f"WHEN {days} <= 30 THEN 'Past month' WHEN {days} <= 90 THEN 'Past 3 months' "
+            f"WHEN {days} <= 365 THEN 'Past year' ELSE substr({col}, 1, 4) END")
+
+
+def host_of(url: str) -> str:
+    return (urlsplit(url or "").hostname or "").lower().removeprefix("www.")
+
+
+def link_kind(url: str, source: str | None, status: str | None) -> str:
+    if source == "transcript" or status == "video":
+        return "video"
+    if host_of(url) in ("x.com", "twitter.com", "mobile.twitter.com"):
+        return "tweet"
+    if status == "skipped":
+        return "other"
+    return "article"
+
+
+def primary_type(r: dict) -> str:
+    kinds = {l["kind"] for l in r.get("links") or []}
+    media = r.get("media") or {}
+    if "article" in kinds:
+        return "article"
+    if "video" in kinds or media.get("video") or media.get("animated_gif"):
+        return "video"
+    if media.get("photo"):
+        return "image"
+    return "text"
+
+
+def fold(s: str) -> str:
+    """Case- and accent-free, for explaining which part of a result matched.
+
+    More lenient than the index: FTS5's unicode61 tokenizer folds case, but
+    strips diacritics from Latin script only, so to the index 'Τσίπρας' and
+    'τσιπρας' are different words (measured 14 Sep: 21 hits against 0)."""
+    return "".join(c for c in unicodedata.normalize("NFD", s)
+                   if not unicodedata.combining(c)).casefold().replace("ς", "σ")
+
+
+def query_terms(q: str) -> list[str]:
+    q = re.sub(r"\b(AND|OR|NOT|NEAR)\b", " ", q or "")
+    return [w for w in re.findall(r"\w+", q) if len(w) > 1]
+
+
+def as_mneme(r: dict, base_url: str = "") -> dict:
+    """A find() result as a Mneme bookmark record (bookmarks.py `_merged`)."""
+    first = (r.get("opener") or r.get("text") or "").strip().split("\n", 1)[0]
+    handle = r.get("author_handle") or ""
+    name = r.get("author_name") or handle
+    archived = [l for l in r.get("links") or [] if l.get("archive_status") == "ok"]
+    state = "archived" if archived else "live"
+    return {
+        "id": r["id"],
+        "url": r["url"],
+        "title": (f"@{handle}: " if handle else "") + first[:140],
+        "description": r.get("text") or "",
+        "folder": "",
+        "tags": r.get("tags") or [],
+        "status": state,
+        "linkStatus": state,
+        "addedAt": r.get("added_at") or "",
+        "datePublished": r.get("created_at") or "",
+        "author": [name] if name else [],
+        "authorHandle": handle,
+        "publication": "X",
+        "language": r.get("lang") or "",
+        "contentType": r.get("contentType") or "",
+        "topic": r.get("topic") or "",
+        "collection": "x",
+        "indexed": bool(archived),
+        "archiveLink": (f"{base_url}/article?url={quote(archived[0]['url'], safe='')}"
+                        if archived else ""),
+        "summary": "",
+        "links": r.get("links") or [],
+        "quoted": r.get("quoted"),
+    }
 
 
 def _utcnow() -> str:
@@ -174,18 +359,41 @@ class Store:
              OR lower(text) LIKE '%thread:%'
              OR text LIKE '1/%' OR text LIKE '%(1/%')"""
 
+    # (time built, facets) -- see facets().
+    _facet_cache: tuple[float, dict] | None = None
+
+    @property
+    def db(self) -> sqlite3.Connection:
+        """This thread's connection, opened on first use.
+
+        One per thread, not one shared. Flask serves requests on separate
+        threads, and a single connection used by two of them at once fails
+        with "sqlite3.InterfaceError: bad parameter or other API misuse". The
+        new UI's four parallel requests at page load hit it on 14 Sep, and an
+        extension ingest arriving at the same moment would have been lost the
+        same way. WAL lets these connections read side by side; writers wait
+        on the busy timeout.
+        """
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            # timeout, and the matching PRAGMA, because background passes hold
+            # brief write locks. Without it the default 5s applies and
+            # concurrent writes fail outright: 32 "database is locked" 500s
+            # were logged while the transcript pass ran, every one of them a
+            # bookmark not captured.
+            conn = sqlite3.connect(self.path, check_same_thread=False, timeout=30)
+            conn.execute("PRAGMA busy_timeout = 30000")
+            conn.execute("PRAGMA foreign_keys = ON")      # per connection, not per file
+            conn.row_factory = sqlite3.Row
+            self._local.conn = conn
+        return conn
+
     def __init__(self, path: str):
         self.path = path
         d = os.path.dirname(os.path.abspath(path))
         if d:
             os.makedirs(d, exist_ok=True)
-        # timeout, and the matching PRAGMA, because background passes hold
-        # brief write locks. Without it the default 5s applies and concurrent
-        # writes fail outright: 32 "database is locked" 500s were logged while
-        # the transcript pass ran, every one of them a bookmark not captured.
-        self.db = sqlite3.connect(path, check_same_thread=False, timeout=30)
-        self.db.execute("PRAGMA busy_timeout = 30000")
-        self.db.row_factory = sqlite3.Row
+        self._local = threading.local()
         self.db.executescript(SCHEMA)
         self._migrate()
         self.db.execute(
@@ -199,6 +407,10 @@ class Store:
         The first 26,946 tweets were captured before any of these existed.
         """
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(tweets)")}
+        # "Is this row only here because a bookmark quotes it?" is asked per
+        # row by the undated scope and the stats; without an index each ask
+        # scans the whole table.
+        self.db.execute("CREATE INDEX IF NOT EXISTS idx_tweets_quoted ON tweets(quoted_id)")
         # Removal has to be a tombstone, not a DELETE. The tweet is still
         # bookmarked on x.com, so the next sync would faithfully re-add it and
         # the removal would silently undo itself.
@@ -233,8 +445,13 @@ class Store:
         # Shortener resolution. resolve_links.py adds these on its first run,
         # but stats() and search read them, so a fresh database without them
         # crashed /api/stats until the resolver had been run once.
+        # The same for the article store and enrich_links.py's columns, which
+        # find(), facets() and stats() read: a fresh database failed
+        # /api/stats with "no such table: articles" until the first archive pass.
+        self.db.executescript(ARTICLES_SCHEMA)
         link_cols = {r[1] for r in self.db.execute("PRAGMA table_info(links)")}
-        for name in ("resolved_url", "resolve_status", "resolved_at"):
+        for name in ("resolved_url", "resolve_status", "resolved_at",
+                     "article_date", "fetched_meta_at", "meta_status"):
             if name not in link_cols:
                 self.db.execute(f"ALTER TABLE links ADD COLUMN {name} TEXT")
         self.db.execute(
@@ -415,9 +632,17 @@ class Store:
             "linksUnresolved": q("SELECT COUNT(DISTINCT expanded_url) FROM links WHERE resolved_url IS NULL"),
             "topics":          q("SELECT COUNT(*) FROM topics"),
             "removed":         q("SELECT COUNT(*) FROM tweets WHERE deleted=1"),
-            # No bookmark time recovered yet, so "bookmarked" falls back to
-            # the day we first saw the tweet.
-            "undated":         q("SELECT COUNT(*) FROM tweets WHERE deleted=0 AND bookmarked_at IS NULL"),
+            # `tweets` counts rows; only rows with a sortIndex are bookmarks.
+            # The rest are tweets a bookmark quotes, plus a few not seen on the
+            # last full walk (probably removed on X) -- `undated`, which the UI
+            # shows so a time frame never silently drops anything. It used to
+            # count every row without a date, quoted tweets included.
+            "bookmarks":       q(f"SELECT COUNT(*) FROM tweets t WHERE t.deleted=0 AND {SCOPES['bookmarks']}"),
+            "quotedOnly":      q("SELECT COUNT(*) FROM tweets t WHERE t.deleted=0 AND t.sort_index IS NULL "
+                                 "AND EXISTS (SELECT 1 FROM tweets b WHERE b.quoted_id = t.id)"),
+            "undated":         q(f"SELECT COUNT(*) FROM tweets t WHERE t.deleted=0 AND {SCOPES['undated']}"),
+            "articles":        q("SELECT COUNT(*) FROM articles WHERE status='ok'"),
+            "articleWords":    q("SELECT COALESCE(SUM(word_count), 0) FROM articles WHERE status='ok'"),
             "oldest":          q("SELECT COALESCE(MIN(created_at), '') FROM tweets WHERE deleted=0"),
             "newest":          q("SELECT COALESCE(MAX(created_at), '') FROM tweets WHERE deleted=0"),
             "dbBytes":         os.path.getsize(self.path) if os.path.exists(self.path) else 0,
@@ -510,113 +735,334 @@ class Store:
                 r["tags"] = tags.get(r["id"], [])
         return rows
 
+    def fts_query(self, q: str) -> str:
+        """The query as typed when FTS5 accepts it, otherwise its words quoted.
+
+        People type `U.S.`, `don't` and `#Gaza`, which FTS5 reads as syntax and
+        rejects; that surfaced as a 500 and an empty list. Checked against both
+        tables because a column filter valid for one is an error in the other.
+        """
+        q = (q or "").strip()
+        if not q:
+            return ""
+        try:
+            for table in ("tweets_fts", "articles_fts"):
+                self.db.execute(f"SELECT 1 FROM {table} WHERE {table} MATCH ? LIMIT 1",
+                                (q,)).fetchall()
+            return q
+        except sqlite3.OperationalError:
+            return " ".join(f'"{w}"' for w in re.findall(r"\w+", q))
+
     def find(self, q: str = "", tag: str = "", topic: str = "", author: str = "",
              since_days: int | None = None, date_from: str = "", date_to: str = "",
              sort: str = "bookmarked", has_archive: str = "",
-             limit: int = 40, offset: int = 0) -> dict:
-        """The one search the app needs: tweets, matched on their own text *or*
-        on the text of the articles they link to.
+             language: str = "", content_type: str = "", status: str = "",
+             date_added: str = "", scope: str = "bookmarks", thread: str = "",
+             order: str = "desc", limit: int = 40, offset: int = 0) -> dict:
+        """The one search the app needs: bookmarks, matched on their own text,
+        their thread, the tweet they quote, or the articles any of those link to.
 
-        A query that only searched tweets would miss the 8 million archived
+        A query that only searched tweets would miss the 9 million archived
         words, which is most of what this collection actually knows. So a hit
-        on an article's body surfaces the tweet that pointed at it, and the
-        result carries a link to the local copy.
+        on an article's body surfaces the tweet that pointed at it, and each
+        result says where it matched (`matchedIn`).
 
-        `sort`:
-          bookmarked — when it entered the collection. NOTE: every tweet from
-                       the original backfill shares one date (the import day),
-                       because x.com does not tell us when a bookmark was made.
-                       Accurate only for tweets captured since.
-          posted     — the tweet's own date, accurate for everything.
+        `scope`: bookmarks (default) | undated | all. Tweets that are only
+        quoted by a bookmark are stored as rows but are not bookmarks, and must
+        not be listed or counted as such.
+
+        `sort`: bookmarked (exact since the sortIndex backfill) | posted.
         """
-        where, params = ["t.deleted = 0"], []
+        p: dict = {}
 
-        if q:
-            # Two indexes, one result set. UNION rather than OR across a join,
-            # so neither FTS table is scanned for rows the other already found.
-            where.append("""t.id IN (
+        def add(v) -> str:
+            k = f"p{len(p)}"
+            p[k] = v
+            return ":" + k
+
+        where = ["t.deleted = 0", SCOPES.get(scope, SCOPES["bookmarks"])]
+        prefix = ""
+        fq = self.fts_query(q)
+        if fq:
+            p["q"] = fq
+            # Links meet articles through two indexed probes, not one join on
+            # COALESCE(resolved_url, expanded_url): no index can serve that
+            # expression, and it took 7 s for "gaza" and 10 s for
+            # "iran OR israel" on the live data. This form takes under 0.1 s.
+            # The CTE is materialised because a bookmark also matches through
+            # the tweet it quotes.
+            prefix = f"""WITH hit(id) AS MATERIALIZED (
                 SELECT t2.id FROM tweets_fts f JOIN tweets t2 ON t2.rowid = f.rowid
-                 WHERE tweets_fts MATCH ?
+                 WHERE tweets_fts MATCH :q
                 UNION
-                SELECT l.tweet_id FROM articles_fts af
-                  JOIN articles a ON a.rowid = af.rowid
-                  JOIN links l ON COALESCE(l.resolved_url, l.expanded_url) = a.url
-                 WHERE articles_fts MATCH ?)""")
-            params += [q, q]
-        if topic:
-            where.append("COALESCE(tp.topic_user, tp.topic) = ?")
-            params.append(topic)
+                SELECT l.tweet_id FROM links l WHERE l.resolved_url IN ({ARTICLE_HITS})
+                UNION
+                SELECT l.tweet_id FROM links l
+                 WHERE l.resolved_url IS NULL AND l.expanded_url IN ({ARTICLE_HITS}))
+            """
+            where.append("(t.id IN (SELECT id FROM hit) OR t.quoted_id IN (SELECT id FROM hit))")
+        if topic == UNCATEGORISED:
+            # The facet lists these under a name no row actually carries.
+            where.append("COALESCE(tp.topic_user, tp.topic) IS NULL")
+        elif topic:
+            where.append(f"COALESCE(tp.topic_user, tp.topic) = {add(topic)}")
         if tag:
             where.append("EXISTS (SELECT 1 FROM user_tags ut "
-                         "WHERE ut.tweet_id = t.id AND ut.tag = ?)")
-            params.append(tag)
+                         f"WHERE ut.tweet_id = t.id AND ut.tag = {add(tag)})")
         if author:
-            where.append("t.author_handle = ?")
-            params.append(author.lstrip("@"))
+            where.append(f"t.author_handle = {add(author.lstrip('@'))} COLLATE NOCASE")
+        if language:
+            where.append(f"t.lang = {add(language)}")
+        if content_type in CONTENT_TYPES:
+            where.append(CONTENT_TYPES[content_type])
+        if status in STATUSES:
+            where.append(STATUSES[status])
+        if thread == "yes":
+            where.append("(t.is_thread = 1 OR t.thread_done = 1)")
         if has_archive == "yes":
-            where.append("""EXISTS (SELECT 1 FROM links l3
-                JOIN articles a3 ON a3.url = COALESCE(l3.resolved_url, l3.expanded_url)
-                WHERE l3.tweet_id = t.id AND a3.status = 'ok')""")
+            where.append(STATUSES["archived"])
         elif has_archive == "links":
-            where.append("EXISTS (SELECT 1 FROM links l4 WHERE l4.tweet_id = t.id)")
+            where.append("EXISTS (SELECT 1 FROM links l WHERE l.tweet_id = t.id)")
 
         added = "COALESCE(t.bookmarked_at, t.first_seen)"
         date_col = added if sort == "bookmarked" else "t.created_at"
 
+        # Stored dates read 2026-09-13T10:00:00Z. datetime('now') gives
+        # "2026-09-13 12:00:00", and "T" sorts after " ", so comparing against it
+        # let a "24 hours" filter admit most of the previous day.
         if since_days:
-            where.append(f"{date_col} >= datetime('now', ?)")
-            params.append(f"-{int(since_days)} days")
+            where.append(f"{date_col} >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', "
+                         f"{add(f'-{int(since_days)} days')})")
         if date_from:
-            where.append(f"{date_col} >= ?")
-            params.append(date_from)
+            where.append(f"{date_col} >= {add(date_from)}")
         if date_to:
-            where.append(f"{date_col} <= ?")
-            params.append(date_to + "T23:59:59Z" if len(date_to) == 10 else date_to)
+            where.append(f"{date_col} <= "
+                         f"{add(date_to + 'T23:59:59Z' if len(date_to) == 10 else date_to)}")
+        if date_added:
+            where.append(f"{bucket_sql(added)} = {add(date_added)}")
 
-        sql = f"""
-            SELECT t.id, t.url, t.author_handle, t.author_name, t.created_at,
-                   t.text, t.quoted_text, t.truncated, t.is_thread,
-                   {added} AS added_at,
+        cond = " AND ".join(where)
+        direction = "ASC" if order == "asc" else "DESC"
+        rows = [dict(r) for r in self.db.execute(f"""{prefix}
+            SELECT {LIST_COLS}, {added} AS added_at,
                    COALESCE(tp.topic_user, tp.topic) AS topic
-            FROM tweets t
-            LEFT JOIN topics tp ON tp.tweet_id = t.id
-            WHERE {' AND '.join(where)}
-            ORDER BY {date_col} DESC, t.id DESC
-            LIMIT ? OFFSET ?"""
-        rows = [dict(r) for r in self.db.execute(sql, params + [limit, offset])]
-
+              FROM tweets t
+              LEFT JOIN topics tp ON tp.tweet_id = t.id
+             WHERE {cond}
+             ORDER BY {date_col} {direction}, t.id {direction}
+             LIMIT {add(int(limit))} OFFSET {add(int(offset))}""", p)]
         count = self.db.execute(
-            f"SELECT COUNT(*) FROM tweets t LEFT JOIN topics tp ON tp.tweet_id = t.id "
-            f"WHERE {' AND '.join(where)}", params).fetchone()[0]
+            f"{prefix} SELECT COUNT(*) FROM tweets t "
+            f"LEFT JOIN topics tp ON tp.tweet_id = t.id WHERE {cond}", p).fetchone()[0]
+        return {"total": count, "results": self._decorate(rows, fq), "query": fq}
 
-        if rows:
-            ids = [r["id"] for r in rows]
-            marks = ",".join("?" * len(ids))
-            links: dict[str, list] = {}
-            for row in self.db.execute(f"""
-                SELECT l.tweet_id,
-                       COALESCE(l.resolved_url, l.expanded_url) AS url,
-                       MAX(NULLIF(l.title,'')) AS title,
-                       MAX(l.article_date) AS article_date,
-                       MAX(a.status) AS archive_status,
-                       MAX(a.word_count) AS words
-                FROM links l
-                LEFT JOIN articles a ON a.url = COALESCE(l.resolved_url, l.expanded_url)
-                WHERE l.tweet_id IN ({marks})
-                -- Group by the expression, not the alias: `articles` also has
-                -- a `url` column, so the bare alias is ambiguous.
-                GROUP BY l.tweet_id, COALESCE(l.resolved_url, l.expanded_url)""", ids):
-                d = dict(row)
-                links.setdefault(d.pop("tweet_id"), []).append(d)
-            tags: dict[str, list[str]] = {}
-            for tid, tg in self.db.execute(
-                    f"SELECT tweet_id, tag FROM user_tags WHERE tweet_id IN ({marks})", ids):
-                tags.setdefault(tid, []).append(tg)
-            for r in rows:
-                r["links"] = links.get(r["id"], [])
-                r["tags"] = tags.get(r["id"], [])
+    def _in(self, sql: str, ids: list, before: tuple = ()) -> list:
+        """Run `sql` with its `{}` replaced by one placeholder per id."""
+        ids = list(dict.fromkeys(i for i in ids if i))
+        if not ids:
+            return []
+        return self.db.execute(sql.format(",".join("?" * len(ids))),
+                               [*before, *ids]).fetchall()
 
-        return {"total": count, "results": rows}
+    def _links_for(self, ids: list, fq: str = "") -> dict[str, list]:
+        """Each tweet's outbound links with their archive state, and, for a
+        query, a highlighted snippet from any archived text that matched."""
+        out: dict[str, list] = {}
+        rows = [dict(r) for r in self._in("""
+            SELECT l.tweet_id,
+                   COALESCE(l.resolved_url, l.expanded_url) AS url,
+                   COALESCE(MAX(NULLIF(l.title, '')), MAX(NULLIF(a.title, ''))) AS title,
+                   MAX(l.article_date) AS article_date,
+                   MAX(a.status) AS archive_status,
+                   MAX(a.word_count) AS words,
+                   MAX(a.source) AS source
+              FROM links l
+              LEFT JOIN articles a ON a.url = COALESCE(l.resolved_url, l.expanded_url)
+             WHERE l.tweet_id IN ({})
+             -- Group by the expression, not the alias: `articles` also has a
+             -- `url` column, so the bare alias is ambiguous.
+             GROUP BY l.tweet_id, COALESCE(l.resolved_url, l.expanded_url)""", ids)]
+        snips: dict[str, str] = {}
+        if fq and rows:
+            # char(2)/char(3) rather than markup: the page escapes the text
+            # first and only then turns these into <mark>.
+            snips = dict(self._in("""
+                SELECT a.url, snippet(articles_fts, 1, char(2), char(3), '…', 24)
+                  FROM articles_fts af JOIN articles a ON a.rowid = af.rowid
+                 WHERE articles_fts MATCH ? AND a.url IN ({})""",
+                [r["url"] for r in rows], before=(fq,)))
+        for r in rows:
+            r["kind"] = link_kind(r["url"], r["source"], r["archive_status"])
+            r["host"] = host_of(r["url"])
+            if r["url"] in snips:
+                r["snippet"] = snips[r["url"]]
+            out.setdefault(r.pop("tweet_id"), []).append(r)
+        return out
+
+    def _decorate(self, rows: list[dict], fq: str = "") -> list[dict]:
+        """Everything a result card shows beyond the tweet row itself."""
+        if not rows:
+            return rows
+        ids = [r["id"] for r in rows]
+        quoted = {r["id"]: dict(r) for r in self._in(
+            "SELECT id, url, author_handle, author_name, created_at, text "
+            "FROM tweets WHERE deleted = 0 AND id IN ({})",
+            [r.get("quoted_id") for r in rows])}
+        links = self._links_for(ids + list(quoted), fq)
+        tags: dict[str, list[str]] = {}
+        for tid, tg in self._in("SELECT tweet_id, tag FROM user_tags WHERE tweet_id IN ({})", ids):
+            tags.setdefault(tid, []).append(tg)
+        media: dict[str, dict] = {}
+        for tid, kind, n in self._in(
+                "SELECT tweet_id, kind, COUNT(*) FROM media WHERE tweet_id IN ({}) GROUP BY 1, 2", ids):
+            media.setdefault(tid, {})[kind] = n
+        parts: dict[str, list[str]] = {}
+        for rid, text in self._in(
+                "SELECT root_id, text FROM thread_parts WHERE root_id IN ({}) "
+                "ORDER BY root_id, position", ids):
+            parts.setdefault(rid, []).append(text or "")
+
+        hits: set[str] = set()
+        terms: list[str] = []
+        if fq:
+            hits = {r[0] for r in self._in(
+                "SELECT t2.id FROM tweets_fts f JOIN tweets t2 ON t2.rowid = f.rowid "
+                "WHERE tweets_fts MATCH ? AND t2.id IN ({})", ids + list(quoted), before=(fq,))}
+            terms = [fold(w) for w in query_terms(fq)]
+
+        def has(s) -> bool:
+            s = fold(s or "")
+            return bool(s) and any(re.search(r"(?<!\w)" + re.escape(w), s) for w in terms)
+
+        for r in rows:
+            full = r.get("text") or ""
+            texts = parts.get(r["id"], [])
+            joined = "\n\n".join(texts)
+            # save_thread appends the author's replies to the opener's text so
+            # that search sees them; the card shows the opener on its own.
+            opener = full
+            if joined and full.endswith(joined):
+                opener = full[:len(full) - len(joined)].rstrip()
+            r["opener"] = opener
+            r["thread_count"] = len(texts)
+            r["links"] = links.get(r["id"], [])
+            r["tags"] = tags.get(r["id"], [])
+            r["media"] = media.get(r["id"], {})
+            qt = quoted.get(r.get("quoted_id") or "")
+            if qt:
+                qt = dict(qt, links=links.get(qt["id"], []))
+            r["quoted"] = qt
+            r["contentType"] = primary_type(r)
+            if fq:
+                m = []
+                if r["id"] in hits:
+                    if has(opener) or has(r.get("author_handle")) or has(r.get("author_name")):
+                        m.append("tweet")
+                    if has(r.get("quoted_text")):
+                        m.append("quoted")
+                    if joined and has(joined):
+                        m.append("thread")
+                    if not m:
+                        m.append("tweet")
+                if any(l.get("snippet") for l in r["links"]):
+                    m.append("article")
+                if qt:
+                    if qt["id"] in hits and "quoted" not in m:
+                        m.append("quoted")
+                    if any(l.get("snippet") for l in qt["links"]):
+                        m.append("quotedArticle")
+                r["matchedIn"] = m
+        return rows
+
+    def tweet(self, tid: str) -> dict | None:
+        """One bookmark with everything the detail panel shows."""
+        row = self.db.execute(f"""
+            SELECT {LIST_COLS}, t.reply_count, t.retweet_count, t.like_count,
+                   t.bookmarked_at, t.first_seen, t.deleted,
+                   COALESCE(t.bookmarked_at, t.first_seen) AS added_at,
+                   COALESCE(tp.topic_user, tp.topic) AS topic,
+                   tp.topic AS topic_model, tp.topic_user
+              FROM tweets t LEFT JOIN topics tp ON tp.tweet_id = t.id
+             WHERE t.id = ?""", (tid,)).fetchone()
+        if not row:
+            return None
+        d = self._decorate([dict(row)])[0]
+        d["thread"] = [dict(r) for r in self.db.execute(
+            "SELECT id, position, created_at, text FROM thread_parts "
+            "WHERE root_id = ? ORDER BY position", (tid,))]
+        d["mediaItems"] = [dict(r) for r in self.db.execute(
+            "SELECT kind, url, alt FROM media WHERE tweet_id = ?", (tid,))]
+        d["hashtags"] = [r[0] for r in self.db.execute(
+            "SELECT tag FROM hashtags WHERE tweet_id = ? ORDER BY tag", (tid,))]
+        d["quotedBy"] = [dict(r) for r in self.db.execute(
+            "SELECT id, url, author_handle FROM tweets "
+            "WHERE quoted_id = ? AND deleted = 0 AND sort_index IS NOT NULL", (tid,))]
+        groups = [d["links"]] + ([d["quoted"]["links"]] if d.get("quoted") else [])
+        for group in groups:
+            for l in group:
+                if l["archive_status"] in ("ok", "thin"):
+                    ex = self.db.execute("SELECT substr(text, 1, 1200) FROM articles WHERE url = ?",
+                                         (l["url"],)).fetchone()
+                    l["excerpt"] = ex[0] if ex else ""
+        return d
+
+    def facets(self, max_age: float = 30.0) -> dict:
+        """Sidebar facets with counts, over bookmarks only.
+
+        Field names follow Mneme's /api/facets (`topics`, `taxonomy`,
+        `dateAdded`, `total`, value/count pairs) so Mneme's client can read it.
+        Cached briefly: it is a dozen scans, and the sidebar asks on every load.
+        """
+        now = time.time()
+        if self._facet_cache and now - self._facet_cache[0] < max_age:
+            return self._facet_cache[1]
+        base = ("FROM tweets t LEFT JOIN topics tp ON tp.tweet_id = t.id "
+                f"WHERE t.deleted = 0 AND {SCOPES['bookmarks']}")
+        pairs = lambda sql: [{"value": v if v is not None else "", "count": n}
+                             for v, n in self.db.execute(sql)]
+
+        topics = pairs(f"SELECT COALESCE(tp.topic_user, tp.topic), COUNT(*) {base} "
+                       "GROUP BY 1 ORDER BY 2 DESC")
+        for t in topics:
+            t["value"] = t["value"] or UNCATEGORISED
+        topics.sort(key=lambda t: t["value"] == UNCATEGORISED)     # stable: keeps count order
+
+        added = "COALESCE(t.bookmarked_at, t.first_seen)"
+        buckets = {v: n for v, n in self.db.execute(
+            f"SELECT {bucket_sql(added)}, COUNT(*) {base} GROUP BY 1")}
+        years = sorted((k for k in buckets if k not in DATE_ORDER and k != "Unknown"), reverse=True)
+
+        # One pass for all the overlapping yes/no facets.
+        named = {**{f"ct_{k}": c for k, c in CONTENT_TYPES.items()},
+                 **{f"st_{k}": c for k, c in STATUSES.items()},
+                 "threads": "(t.is_thread = 1 OR t.thread_done = 1)"}
+        sums = self.db.execute(
+            "SELECT " + ", ".join(f"SUM(CASE WHEN {c} THEN 1 ELSE 0 END)" for c in named.values())
+            + f" {base}").fetchone()
+        sums = dict(zip(named, (n or 0 for n in sums)))
+
+        out = {
+            "total": self.db.execute(f"SELECT COUNT(*) {base}").fetchone()[0],
+            "topics": topics,
+            "taxonomy": [t["value"] for t in topics if t["value"] != UNCATEGORISED],
+            "assigned": sum(t["count"] for t in topics if t["value"] != UNCATEGORISED),
+            "builtAt": "",
+            "dateAdded": [{"value": k, "count": buckets[k]}
+                          for k in [*DATE_ORDER, *years, "Unknown"] if k in buckets],
+            "language": pairs(f"SELECT t.lang, COUNT(*) {base} GROUP BY 1 ORDER BY 2 DESC"),
+            "contentType": [{"value": k, "count": sums[f"ct_{k}"]} for k in CONTENT_TYPES],
+            "status": [{"value": k, "count": sums[f"st_{k}"]} for k in STATUSES],
+            "threads": sums["threads"],
+            "tags": [{"value": d["tag"], "count": d["n"]} for d in self.tag_counts()],
+            "authors": [{"value": h, "name": nm, "count": n} for h, nm, n in self.db.execute(
+                f"SELECT t.author_handle, MAX(t.author_name), COUNT(*) {base} "
+                "GROUP BY 1 ORDER BY 3 DESC LIMIT 50")],
+            "undated": self.db.execute(
+                f"SELECT COUNT(*) FROM tweets t WHERE t.deleted = 0 AND {SCOPES['undated']}"
+            ).fetchone()[0],
+        }
+        self._facet_cache = (now, out)
+        return out
 
     def thread_queue(self, limit: int = 1) -> list[dict]:
         """Bookmarks that look like threads and have not been fetched yet.

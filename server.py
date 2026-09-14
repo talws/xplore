@@ -20,9 +20,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, Response, send_from_directory
 
 # Windows consoles default to a legacy codepage -- cp1253 on this machine --
 # and the startup banner below contains box-drawing characters and an em-dash.
@@ -37,7 +38,7 @@ try:
 except Exception:
     pass
 
-from store import Store
+from store import Store, as_mneme
 from parse import parse_bookmarks_response, is_end_of_timeline, parse_thread
 import capture   # capture-on-view: /api/capture*, see capture.py
 
@@ -255,25 +256,74 @@ def ingest_thread():
     return jsonify({"ok": True, "parts": n, "remaining": store.thread_queue_size()})
 
 
+def _int(v, default: int, lo: int = 0, hi: int | None = None) -> int:
+    """A query-string integer that cannot 500 the request."""
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return default
+    n = max(lo, n)
+    return min(n, hi) if hi is not None else n
+
+
+def _find_args(a, limit_default: int = 40, limit_max: int = 200) -> dict:
+    s = lambda k, d="": (a.get(k) or d).strip()
+    since = s("since")
+    return dict(
+        q=s("q"), tag=s("tag"), topic=s("topic"), author=s("author"),
+        since_days=int(since) if since.isdigit() else None,
+        date_from=s("from"), date_to=s("to"),
+        sort=s("sort", "bookmarked"), order=s("order", "desc"),
+        has_archive=s("archive"), language=s("language"),
+        content_type=s("contentType"), status=s("status"),
+        date_added=s("dateAdded"), scope=s("scope", "bookmarks"), thread=s("thread"),
+        limit=_int(a.get("limit"), limit_default, 1, limit_max),
+        offset=_int(a.get("offset"), 0),
+    )
+
+
 @app.route("/api/find")
 def api_find():
-    """The search the new UI runs: tweets matched on their own text or on the
-    text of the articles they link to."""
+    """The search the UI runs: bookmarks matched on their own text, their
+    thread, the tweet they quote, or the text of the articles they link to."""
+    return jsonify(store.find(**_find_args(request.args)))
+
+
+@app.route("/api/tweets/<tid>")
+def api_tweet(tid):
+    """One bookmark for the detail panel: thread, quoted tweet, links with
+    excerpts of their archived text, media and hashtags."""
+    d = store.tweet(tid.strip())
+    if d is None:
+        return jsonify({"error": "no such tweet"}), 404
+    return jsonify(d)
+
+
+@app.route("/api/facets")
+def api_facets():
+    """Sidebar facets. Mneme's /api/facets shape, plus Xplore's own facets."""
+    return jsonify(store.facets())
+
+
+@app.route("/api/bookmarks")
+def api_bookmarks():
+    """Mneme's read contract, so Mneme's existing client can list Xplore.
+
+    Same parameters as Mneme (`q`, `contentType`, `language`, `topic`,
+    `dateAdded`, `collection`) and the same `{count, bookmarks}` envelope.
+    Xplore's collection is named `x`. Unlike Mneme this pages: `limit`
+    (default 1000, max 5000) and `offset`, with `total` for the full count.
+    """
     a = request.args
-    since = a.get("since")
-    return jsonify(store.find(
-        q=(a.get("q") or "").strip(),
-        tag=(a.get("tag") or "").strip(),
-        topic=(a.get("topic") or "").strip(),
-        author=(a.get("author") or "").strip(),
-        since_days=int(since) if since and since.isdigit() else None,
-        date_from=(a.get("from") or "").strip(),
-        date_to=(a.get("to") or "").strip(),
-        sort=(a.get("sort") or "bookmarked").strip(),
-        has_archive=(a.get("archive") or "").strip(),
-        limit=min(int(a.get("limit", 40)), 200),
-        offset=int(a.get("offset", 0)),
-    ))
+    coll = (a.get("collection") or "").strip()
+    if coll and coll not in ("x", "all"):
+        return jsonify({"count": 0, "total": 0, "offset": 0, "bookmarks": []})
+    args = _find_args(a, limit_default=1000, limit_max=5000)
+    r = store.find(**args)
+    base = request.host_url.rstrip("/")
+    recs = [as_mneme(t, base) for t in r["results"]]
+    return jsonify({"count": len(recs), "total": r["total"], "offset": args["offset"],
+                    "bookmarks": recs})
 
 
 @app.route("/article")
@@ -406,11 +456,53 @@ def _quarantine(raw: str, reason) -> None:
         pass
 
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+UI_DIR = os.path.join(HERE, "ui")
+ASSETS_DIR = os.path.join(HERE, "assets")
+
+# Set explicitly. On Windows, Python's mimetypes reads the registry, where .js
+# is often registered as text/plain, and a browser refuses to run an ES module
+# served with that type: the page would load and do nothing.
+STATIC_TYPES = {".js": "text/javascript", ".css": "text/css", ".html": "text/html",
+                ".png": "image/png", ".ico": "image/x-icon", ".svg": "image/svg+xml"}
+
+
+def _static(folder: str, name: str):
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in STATIC_TYPES or not re.fullmatch(r"[\w.\-/]+", name) or ".." in name:
+        return Response("not found", status=404)
+    # No caching: the UI is plain files meant to be edited without a restart.
+    return send_from_directory(folder, name, mimetype=STATIC_TYPES[ext], max_age=0)
+
+
 @app.route("/")
 def index():
-    """The main UI, kept in app.html so it can be edited without touching
-    Python. Falls back to the minimal built-in page if the file is absent."""
-    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.html")
+    """The Xplore UI (ui/). Falls back to the classic page if it is absent."""
+    if os.path.exists(os.path.join(UI_DIR, "index.html")):
+        return _static(UI_DIR, "index.html")
+    return index_classic()
+
+
+@app.route("/ui/<path:name>")
+def ui_file(name):
+    return _static(UI_DIR, name)
+
+
+@app.route("/assets/<path:name>")
+def asset_file(name):
+    return _static(ASSETS_DIR, name)
+
+
+@app.route("/favicon.ico")
+def favicon():
+    return _static(ASSETS_DIR, "xplore.ico")
+
+
+@app.route("/classic")
+def index_classic():
+    """The previous UI, kept until the new one has been used for a while.
+    Kept in app.html so it can be edited without touching Python."""
+    p = os.path.join(HERE, "app.html")
     if os.path.exists(p):
         with open(p, encoding="utf-8") as fh:
             return Response(fh.read(), mimetype="text/html")
@@ -578,7 +670,7 @@ if __name__ == "__main__":
     capture.init(store)
     s = store.stats()
     print()
-    print("  X bookmark collector")
+    print("  Xplore — X bookmark collector")
     print("  ─────────────────────────────────────────────")
     print(f"  DB:      {DB_PATH}")
     print(f"  Held:    {s['tweets']} tweets  |  {s['uniqueLinks']} links "

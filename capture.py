@@ -41,6 +41,7 @@ from bs4 import BeautifulSoup
 from flask import Blueprint, jsonify, request
 
 from archive_links import MAX_CHARS, classify, extract
+from store import WORKLIST_STATUSES   # one definition, shared with the library facets
 import urls
 
 bp = Blueprint("capture", __name__)

@@ -85,7 +85,7 @@ chrome.alarms.onAlarm.addListener(async (a) => {
     // needs a human.
     await notifyOnce(
       "stalled",
-      "X Bookmark Collector — sync did not complete",
+      "Xplore — sync did not complete",
       "The server is running but x.com returned nothing. You may need to sign " +
       "in to x.com again.");
     return;                                                   // try again next hour
@@ -139,7 +139,7 @@ async function runSync() {
     await chrome.storage.local.set({ syncStartedAt: 0 });
     await notifyOnce(
       "serverdown",
-      "X Bookmark Collector — not running",
+      "Xplore — not running",
       "Bookmarks are not being captured. Start the server (start.bat in the " +
       "xcollector folder), then it will catch up on its own.");
     return;
@@ -251,7 +251,7 @@ async function threadEnd(reason) {
     try {
       chrome.notifications.create("threadsdone:" + Date.now(), {
         type: "basic", iconUrl: chrome.runtime.getURL("icon-128.png"),
-        title: "X Bookmark Collector — thread pass complete",
+        title: "Xplore — thread pass complete",
         message: "Every queued thread has been fetched.", priority: 1,
       });
     } catch (e) {}
@@ -269,7 +269,7 @@ async function threadAdvance() {
     // Don't end the run over a server hiccup. Leave it for the watchdog, which
     // retries once the heartbeat goes stale, and say so out loud.
     await setRun({ lastBeat: Date.now() });
-    await notifyOnce("serverdown", "X Bookmark Collector — not running",
+    await notifyOnce("serverdown", "Xplore — not running",
       "The thread pass cannot reach the server. Start it (start.bat) and the " +
       "pass will resume on its own.");
     return { ok: false, error: r.status ? "server error " + r.status : "server unreachable" };

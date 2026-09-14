@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "X Bookmark Collector",
-  "version": "0.1.0",
-  "description": "Capture your x.com bookmarks into a local database on port 8502. Nothing leaves this machine.",
+  "name": "Xplore",
+  "version": "0.2.0",
+  "description": "Xplore's capture extension: saves your x.com bookmarks, and archive.today pages you open, to Xplore on port 8502. Nothing leaves this machine.",
   "permissions": [
     "alarms",
     "tabs",

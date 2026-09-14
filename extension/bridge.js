@@ -63,7 +63,7 @@
       "border:1px solid #444;border-radius:10px;padding:10px 12px;" +
       "box-shadow:0 4px 18px #0007;min-width:190px";
     panel.innerHTML =
-      '<div style="font-weight:600;margin-bottom:6px">X Bookmark Collector</div>' +
+      '<div style="font-weight:600;margin-bottom:6px">Xplore</div>' +
       '<div id="xbc-status" style="opacity:.8;margin-bottom:8px">idle</div>' +
       '<div style="display:flex;gap:6px">' +
       '<button id="xbc-btn" style="font:inherit;flex:1;padding:5px 8px;' +
