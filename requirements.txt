@@ -1,0 +1,13 @@
+# Xplore's Python packages.  Install with:
+#   python -m pip install -r requirements.txt
+
+flask>=3.0            # the local server and API
+requests>=2.31        # fetching articles for the archive
+beautifulsoup4>=4.12  # extracting article text
+certifi               # certificate bundle; Windows' own chain fails on some shorteners
+
+# The desktop window (xplore.pyw). Without it, use the browser at http://localhost:8502
+pywebview>=6.0
+
+# Optional: transcripts of linked videos (transcripts.py)
+yt-dlp

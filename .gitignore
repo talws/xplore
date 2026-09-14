@@ -15,6 +15,9 @@ x-links*.html
 # Run logs
 *.log
 
+# Packages built by package-for-tester.ps1
+dist/
+
 # Python
 __pycache__/
 *.pyc
