@@ -789,3 +789,112 @@ The classic UI moved to `/classic`. The new one is `ui/index.html` plus `xplore.
   1. Reload the extension, then reload the x.com tab.
   2. Decide on committing this work and on tombstoning the 55 undated rows.
 - **Next:** C1, as planned.
+
+Committed and pushed as `a2b52c9`, at the owner's request.
+
+---
+
+## Supplement 5 — C1 decisions and the tester package (14 September, late)
+
+### C1: owner's answers to the mockup
+
+1. **Where:** a **Related drawer on each result card**, not a separate Related tab. The typed-text
+   seed becomes a "Related to “query”" drawer at the top of search results. Page seeds
+   (`?url=`) are API-only for now.
+2. **Signals:** approved as proposed: same link, thread or quote, shared words, same author,
+   hashtag or tag, same topic, saved near in time (default within 7 days). **The owner wants
+   this to become LLM-driven eventually.** C2's re-rank and query expansion work on these
+   candidates, using the fired signals as their evidence. C1 stays the no-key fallback.
+3. **Order:** related links first, archived copies ahead of missing ones among the best
+   matches, then related bookmarks. Each item has a score bar and the signals that fired.
+4. **Seeds:** a tweet, a link, or any typed text.
+
+Built in `related.py` (weights and rules in its docstring), `GET /api/related` and
+`ui/related.js`.
+
+**C1 results (15 Sep).**
+
+- **Gate met.** `/api/related` answers in 0.11–0.46 s on the database copy, for:
+  - a tweet with an archived article, a thread, a quoting tweet, a Greek tweet, and a
+    link-less tweet by a prolific author;
+  - a page URL;
+  - three typed queries.
+
+  Signals are shown per item. Browser check:
+  - the drawer opens on a card without selecting it;
+  - it expands to seven signal toggles and a time window; switching off shared words took one
+    seed from 44 bookmarks to 13;
+  - a row opens that bookmark in the detail panel;
+  - a search shows a "Related to “ceasefire”" drawer.
+
+  No console errors. The API suite still passes 61/61.
+- **The API:**
+  - takes `tweet`, `url` or `q`, plus `window` (days, default 7), `signals` (a comma list, or
+    `none`), `links` and `tweets` limits;
+  - returns `terms`, a count per signal, totals, `links` (with `score`, `signals`, `terms`,
+    `saved_by`) and `tweets` (find-shaped rows plus `related`).
+- **Tuning, learned on real seeds:**
+  - **Shared words are weighted by rarity (IDF), not counted.** A candidate needs 25% of the
+    seed's word weight. Counting let "may", "read" and "report" relate an AI-privacy thread to
+    climate-data pages.
+  - **URLs are stripped before choosing words.** A t.co code shared by a tweet and its quote
+    ranked as the most distinctive word.
+  - **The index folds final sigma:** it stores "τσίπρασ". Tokens and stopwords are folded the
+    same way; before that, a typed "Τσίπρας" found nothing.
+- **Known weak spots for C2 to fix:**
+  - lexical false friends: "data" and "dataset" still pull sea-ice data pages;
+  - generic homepage titles such as "Press Releases – McCain Institute";
+  - the topic signal is idle on new bookmarks until `topics.py --assign` runs;
+  - Greek words without tonos do not match (see supplement 4).
+- **Deployed** to the live server on 15 Sep. Live timings: 0.24–0.40 s inside the server, and
+  0.25–0.36 s end to end. **Not committed yet.**
+- **Trap: from Python, `localhost` costs about 2 s.** It tries IPv6 `::1` first, and the server
+  listens on 127.0.0.1 only. Every scripted call measured 2.3 s until the client used
+  `127.0.0.1`; the earlier stress-test totals are inflated by the same amount. The launcher's ping
+  and the server's "already running" check had a 2 s timeout, so both now use `127.0.0.1`.
+  Browsers and WebView2 are not affected.
+
+### H. Tester package (owner request, 14 Sep). Scheduled after C2, before D
+
+**Goal:** a third party installs and uses Xplore without Python or scripts.
+
+**Why the extension alone is not enough:** it can be shared today, as the `extension` folder
+loaded with Developer mode → Load unpacked, the way the owner installed it. But all it does is
+send pages to the server on `localhost:8502`, and that server needs Python.
+
+1. **Windows installer.**
+   - *Build:* a PyInstaller one-folder build of `server.py` and `xplore.pyw` (Python, Flask,
+     bs4, requests, certifi, pywebview, pythonnet), wrapped in an Inno Setup installer.
+   - *Where things go:* the program in Program Files. **Data in `%LOCALAPPDATA%\Xplore`**
+     (database, `unparsed/`, logs), because Program Files is not writable; the server and
+     launcher need a data-directory setting for that.
+   - *Setup:* desktop and Start menu shortcuts, and start at login. Uninstalling keeps the data
+     unless the tester asks otherwise.
+   - *The passes* (resolve, enrich, archive, topics, transcripts) become an in-app
+     "Update library" action or a scheduled task, not scripts. `yt-dlp.exe` is bundled. Topics
+     need the tester's own key, set in C2's Settings, and are otherwise off.
+   - *Signing:* unsigned at first, so Windows SmartScreen warns once ("More info → Run anyway").
+2. **Extension export.**
+   - *Chrome:* a zip for Load unpacked. Chrome blocks `.crx` files from outside the Web Store
+     on Windows, and a store listing invites review of the X interception (see §E).
+   - *Firefox:* a signed, unlisted `.xpi` through addons.mozilla.org. Verify on a real install:
+     - `world: "MAIN"` content scripts (Firefox 128 and later);
+     - `browser_specific_settings.gecko.id`;
+     - background scripts in place of the service worker.
+3. **None of the owner's data.**
+   - Build from a clean checkout and ship an empty database.
+   - The build script fails if any `.db`, `x-links*` export, `unparsed/` file or log is in the
+     bundle.
+4. **First run.** A `/setup` page with the extension steps and a link to x.com/i/bookmarks, and
+   an empty state that says what to do.
+5. **Updates.** A new installer per release at first. Later, a version check. The repo is
+   private, so releases need a channel the tester can reach.
+
+**Gate:** on a Windows account with no Python, the tester can:
+- install;
+- load the extension;
+- sync their bookmarks;
+- search and use Related;
+- uninstall.
+
+The recommended order in §3 is now: A + B (done) → C1 → C2 → **H** → D → F.

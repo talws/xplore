@@ -41,6 +41,7 @@ except Exception:
 from store import Store, as_mneme
 from parse import parse_bookmarks_response, is_end_of_timeline, parse_thread
 import capture   # capture-on-view: /api/capture*, see capture.py
+import related   # C1 related items: /api/related, see related.py
 
 app = Flask(__name__)
 app.register_blueprint(capture.bp)
@@ -297,6 +298,30 @@ def api_tweet(tid):
     if d is None:
         return jsonify({"error": "no such tweet"}), 404
     return jsonify(d)
+
+
+@app.route("/api/related")
+def api_related():
+    """C1: related links and bookmarks for ?tweet=, ?url= or ?q=.
+
+    `window` (days, default 7) sets "saved near in time"; `signals` is a
+    comma list to restrict which signals count (default all; `none` for none);
+    `links` and `tweets` cap the two lists. Scope is the X library only until
+    the Mneme sidecar (C3) exists.
+    """
+    a = request.args
+    sig = (a.get("signals") or "").strip()
+    r = related.related(
+        store,
+        tweet=(a.get("tweet") or "").strip(), url=(a.get("url") or "").strip(),
+        q=(a.get("q") or "").strip(),
+        window=_int(a.get("window"), 7, 1, 365),
+        signals=None if not sig else set(sig.split(",")),
+        links_limit=_int(a.get("links"), 12, 1, 50),
+        tweets_limit=_int(a.get("tweets"), 30, 1, 100))
+    if r is None:
+        return jsonify({"error": "give a known ?tweet=, a ?url= or a ?q="}), 400
+    return jsonify(r)
 
 
 @app.route("/api/facets")
@@ -659,7 +684,9 @@ if __name__ == "__main__":
     # use" and leaving a confusing traceback in the log.
     try:
         import urllib.request
-        with urllib.request.urlopen(f"http://localhost:{PORT}/api/ping", timeout=2) as r:
+        # 127.0.0.1: from Python, "localhost" tries IPv6 first and takes about
+        # 2 s to fall back, long enough to miss a running copy and start another.
+        with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/api/ping", timeout=3) as r:
             if json.load(r).get("service") == "xcollector":
                 print(f"  already running on port {PORT} — nothing to do")
                 sys.exit(0)

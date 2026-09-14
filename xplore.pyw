@@ -49,8 +49,12 @@ def log(msg: str) -> None:
 
 
 def server_alive() -> bool:
+    # 127.0.0.1, not localhost: Python on this machine tries IPv6 ::1 first and
+    # spends about 2 s failing over, which is the whole timeout. The server
+    # listens on IPv4 only. (The window itself uses localhost; WebView2 does not
+    # have the delay.)
     try:
-        with urllib.request.urlopen(URL + "api/ping", timeout=2) as r:
+        with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/api/ping", timeout=3) as r:
             return json.load(r).get("service") == "xcollector"
     except Exception:
         return False

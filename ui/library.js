@@ -3,6 +3,7 @@ import { $, $$, esc, api, num, relDate, fmtDateTime, highlight, terms, langName,
          TYPE_LABEL, STATUS_LABEL } from "./util.js";
 import { linkRow, quoteBlock, WORKLIST } from "./render.js";
 import { openDetail, setTaxonomy } from "./detail.js";
+import { toggleDrawer } from "./related.js";
 
 const DEFAULTS = {
   q: "", since: "", from: "", to: "", sort: "bookmarked", order: "desc",
@@ -215,6 +216,7 @@ function card(t) {
   if (m.photo) foot.push(`<span class="pill muted">${m.photo} photo${m.photo > 1 ? "s" : ""}</span>`);
   const vids = (m.video || 0) + (m.animated_gif || 0);
   if (vids) foot.push(`<span class="pill muted">${vids} video${vids > 1 ? "s" : ""}</span>`);
+  if (t.is_bookmark) foot.push(`<button class="rel-btn" data-related aria-expanded="false" title="Links and bookmarks related to this one">Related</button>`);
 
   let quote = "";
   if (t.quoted) quote = quoteBlock(t.quoted, T);
@@ -237,6 +239,12 @@ function card(t) {
       <div class="foot">${foot.join("")}<a class="on-x" href="${esc(t.url)}" target="_blank" rel="noopener">Open on X ↗</a></div>
     </div>
   </article>`;
+}
+
+// A typed search can seed Related too: the drawer sits above the results.
+function queryDrawer() {
+  return `<div class="rel-q"><button class="rel-q-btn" data-related-q aria-expanded="false"
+    title="Links and bookmarks related to this search, found by more than its words">Related to “${esc(state.q)}” ▸</button></div>`;
 }
 
 const nearEnd = () => { const l = $("#list"); return l.scrollHeight - l.scrollTop - l.clientHeight < 900; };
@@ -262,11 +270,11 @@ export async function load(reset) {
     if (my !== seq) return;
     T = terms(r.query || state.q);
     total = r.total;
-    if (reset) results.innerHTML = "";
+    if (reset) results.innerHTML = state.q && state.scope === "bookmarks" ? queryDrawer() : "";
     if (reset && !r.results.length) {
       const filtered = paramsForHash().replace(/(^|&)(sort|order)=[^&]*/g, "");
-      results.innerHTML = `<div class="empty"><p>Nothing matches.</p>
-        <small>${filtered ? "Try removing a filter or widening the time frame." : "No bookmarks yet: run a sync from x.com/i/bookmarks."}</small></div>`;
+      results.insertAdjacentHTML("beforeend", `<div class="empty"><p>Nothing matches.</p>
+        <small>${filtered ? "Try removing a filter or widening the time frame." : "No bookmarks yet: run a sync from x.com/i/bookmarks."}</small></div>`);
     }
     results.insertAdjacentHTML("beforeend", r.results.map(card).join(""));
     offset += r.results.length;
@@ -318,6 +326,21 @@ export function move(delta) {
 
 export function init() {
   $("#results").addEventListener("click", e => {
+    // The drawer handles its own clicks; none of them select the card.
+    if (e.target.closest(".rel")) return;
+    const rb = e.target.closest("[data-related]");
+    if (rb) {
+      const open = toggleDrawer(rb.closest(".card-body"), { tweet: rb.closest(".card").dataset.id });
+      rb.setAttribute("aria-expanded", String(open));
+      return;
+    }
+    const rq = e.target.closest("[data-related-q]");
+    if (rq) {
+      const open = toggleDrawer(rq.parentElement, { q: state.q });
+      rq.setAttribute("aria-expanded", String(open));
+      rq.textContent = `Related to “${state.q}” ${open ? "▾" : "▸"}`;
+      return;
+    }
     if (e.target.closest("a, input, [data-recover]")) return;
     const f = e.target.closest("[data-filter]");
     if (f) { setFilter(f.dataset.filter, f.dataset.value); return; }

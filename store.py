@@ -449,6 +449,10 @@ class Store:
         # find(), facets() and stats() read: a fresh database failed
         # /api/stats with "no such table: articles" until the first archive pass.
         self.db.executescript(ARTICLES_SCHEMA)
+        # How many tweets contain each word, read by related.py to pick a
+        # seed's distinctive words. A view over the index; it stores nothing.
+        self.db.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS tweets_fts_vocab USING fts5vocab(tweets_fts, row)")
         link_cols = {r[1] for r in self.db.execute("PRAGMA table_info(links)")}
         for name in ("resolved_url", "resolve_status", "resolved_at",
                      "article_date", "fetched_meta_at", "meta_status"):
