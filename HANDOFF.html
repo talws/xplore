@@ -1,0 +1,208 @@
+<!doctype html><meta charset="utf-8"><title>Xplore — handoff</title>
+<style>:root{color-scheme:light dark;--line:#8883}
+body{font:15.5px/1.62 system-ui,-apple-system,"Segoe UI",sans-serif;margin:0 auto;padding:34px 24px 70px;max-width:860px}
+h1{font-size:26px}h2{font-size:19px;margin:32px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line)}
+h3{font-size:16px;margin:22px 0 6px}code{font:13px ui-monospace,Consolas,monospace;background:#8881;padding:1px 5px;border-radius:4px}
+pre{background:#8881;border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow-x:auto;font:13px ui-monospace,Consolas,monospace}
+li{margin:6px 0 6px 20px}table{border-collapse:collapse;margin:12px 0;width:100%}
+td{border:1px solid var(--line);padding:6px 10px;font-size:14px;vertical-align:top}tr td:first-child{font-weight:500;width:30%}
+hr{border:0;border-top:1px solid var(--line);margin:26px 0}</style>
+<h1>Xplore — handoff</h1>
+
+<p><strong>Xplore</strong> is a standalone local tool that captures your x.com bookmarks, resolves</p>
+<p>and archives the articles they link to, classifies everything by topic, and makes</p>
+<p>the lot searchable. It currently lives at <code>C:\Users\mihal\Desktop\Code\xcollector</code></p>
+<p>and runs on <strong>port 8502</strong> (the port the earlier, lost tool used).</p>
+
+<p>It is <strong>deliberately separate from Mneme</strong>. That is an owner decision, recorded</p>
+<p>2026-09-04 and not to be revisited casually: browser bookmarks and x.com</p>
+<p>bookmarks are different collections and keep different stores. Searching the two</p>
+<p>together is a <em>federation</em> job, not a merge. Do not add an <code>x</code> collection to</p>
+<p>Mneme, and do not route tweets or their articles through Mneme&#x27;s store.</p>
+
+<hr>
+
+<h2>TODO — start here</h2>
+
+<h3>1. Capture-on-view for the 1,126 unarchivable articles  ← highest value</h3>
+
+<p><strong>The finding that drives this:</strong> an NYT article that the archiver could not get</p>
+<p><em>was</em> fully available on archive.is once the owner passed the bot check by hand.</p>
+<p>So the content exists; only automated access is blocked.</p>
+
+<p><strong>Two things are true and both matter:</strong></p>
+
+<li><strong>The archive.ph / archive.is tier was never implemented.</strong> Earlier notes and conversation described a &quot;three-tier&quot; fetch (direct → Wayback → archive.ph). Only two tiers were built. <code>articles.source</code> shows 3,854 <code>direct</code>, 1,879 <code>wayback</code>, and zero <code>archiveph</code>. The schema comment mentions it; no code does.</li>
+<li><strong>Adding it server-side will only partly work.</strong> archive.ph sits behind Cloudflare, which is the same wall that produced 699 <code>http403</code> results in the first place. Mneme&#x27;s <code>fetcher.py</code> has <code>_archph_cloudflare()</code> and a mirror list (<code>archive.ph</code>, <code>.is</code>, <code>.today</code>, <code>.li</code>, <code>.fo</code>) precisely because it kept getting challenged — port that, but expect partial success.</li>
+
+<p><strong>The reliable route is Mneme&#x27;s &quot;auto-scrape on view&quot;.</strong> Mneme&#x27;s extension</p>
+<p>captures a page&#x27;s text when the owner <em>visits</em> a bookmarked page that has no</p>
+<p>text yet (<code>background.js</code>, plus <code>/api/clip</code> and <code>/api/clip/status</code>). A human in</p>
+<p>the loop passes the Cloudflare check for free.</p>
+
+<p>Suggested shape:</p>
+
+<li>A worklist view in Xplore listing the 1,126 (`articles.status IN (&#x27;failed&#x27;,&#x27;thin&#x27;,&#x27;botscreen&#x27;)`), each with an archive.is link, ordered by how many bookmarks reference it.</li>
+<li>Extend the Xplore extension with a content script on <code>archive.ph|is|today|li|fo</code> and on the publisher domains, which asks the server &quot;do you already have text for this URL?&quot; and if not, extracts and posts it.</li>
+<li>Reuse <code>archive_links.py</code>&#x27;s <code>extract()</code> and <code>classify()</code> so a captured page is stored and classified identically to a fetched one.</li>
+
+<p>Worth reading first: <code>bookmarktool/version2/fetcher.py</code> (<code>should_skip</code>,</p>
+<p><code>_is_bot_screen</code>, <code>_archph_cloudflare</code>, the mirror rotation) and</p>
+<p><code>bookmarktool/extension/background.js</code> for the on-view trigger. Read only —</p>
+<p>Mneme has its own active session.</p>
+
+<h3>2. Make Xplore a real desktop app</h3>
+
+<p>Today it is a Flask process started by a login script plus a browser tab. It</p>
+<p>should be a thing you launch from the desktop.</p>
+
+<li><strong>Name: Xplore.</strong> Rename the folder, the window title, <code>app.html</code>&#x27;s <code>&lt;title&gt;</code>, the extension name in <code>extension/manifest.json</code>, and the server banner.</li>
+<li><strong>Branding assets:</strong> the owner has a logo (wordmark) and an app icon (rounded square, blue gradient, X + bookmark-stack motif). **They are not yet in the repo** — they were shared in chat and need saving to <code>xcollector/assets/xplore-logo.png</code> and <code>assets/xplore-icon.png</code>, then wired into <code>app.html</code>&#x27;s header and the extension icons (replacing the placeholder <code>icon-16/48/128.png</code> I generated).</li>
+<li><strong>Launcher options</strong>, cheapest first: a desktop shortcut to <code>start-collector.vbs</code> that also opens <code>http://localhost:8502</code>; or a real window via <code>pywebview</code>/Tauri wrapping the same local server; or Electron if a tray icon and native menus are wanted. The server does not need to change for any of them.</li>
+<li>Keep the login auto-start — but see the Unicode trap below.</li>
+
+<h3>3. Then the phases the owner has already scoped</h3>
+
+<li><strong>(d)</strong> LLM-powered second level: find related tweets and links *across Xplore and Mneme&#x27;s full-text repository*. This is the federation seam, and it is why the stores are separate.</li>
+<li><strong>(e)</strong> A Compendium auto-generated Story Tracker over the same period, from an OPML list the app prompts for.</li>
+<li><strong>(f)</strong> Second integration path across all three apps, parallel to the OSINT path.</li>
+<li><strong>(g)</strong> Xplore eventually producing and updating a <em>separate</em> Mneme collection. Design the seam, not a merge.</li>
+
+<h3>4. Smaller, still open</h3>
+
+<li><strong>Video transcripts — done.</strong> <code>yt-dlp</code> installed; <code>transcripts.py</code> recovered 102 of 150 (629,222 words). The rest: 19 no subtitles, 8 private, 8 unavailable, 6 download errors, 4 bot-blocked, 3 OS errors. **The video detector is too broad** — <code>odysee.com/</code> also matches <em>channel</em> pages, which yt-dlp cannot read at all. Tighten <code>VIDEO_HOSTS</code> in <code>archive_links.py</code>.</li>
+<li><strong>Bookmark dates for the backfill.</strong> See the known-limitations section — this is the one data gap that will never heal by itself.</li>
+<li><strong>4 tweets are unclassified</strong> out of 27,262; DeepSeek declines them. Harmless.</li>
+<li><strong>Thread pass: check it finished</strong>, then regenerate the exports so threads show. Two robustness fixes are still owed, both needing an extension reload so <em>not</em> mid-run: (a) <strong>scope thread mode to its own tab</strong> — the flag is extension-wide, so any <code>/status/</code> page opened in the same Chrome profile gets pulled into the pass; (b) <strong>auto-recover from a renderer crash</strong> — a crashed tab runs no JS, so the 45s timeout cannot fire; the worker should notice and reload it.</li>
+
+<hr>
+
+<h2>Current state (night of 12–13 September)</h2>
+
+<table>
+<tr><td>Tweets</td><td>27,262</td></tr>
+<tr><td>Classified by topic</td><td>27,258 (25-topic taxonomy)</td></tr>
+<tr><td>Unique outbound links</td><td>5,727 (after shortener resolution)</td></tr>
+<tr><td>Articles archived</td><td>4,457 — 3,854 direct, 603 Wayback</td></tr>
+<tr><td>Words of archived text</td><td>~8,000,000</td></tr>
+<tr><td>Unrecoverable articles</td><td>1,126 (the TODO-1 worklist)</td></tr>
+<tr><td>Video transcripts</td><td><strong>done</strong> — 102 of 150 (68%), 629,222 words</td></tr>
+<tr><td>Thread pass</td><td><strong>running overnight</strong> — 182 fetched by 23:00 UTC, 175 real threads, 1,954 author replies; ~2,000 left at ~4/min</td></tr>
+<tr><td>Database</td><td><code>xbookmarks.db</code>, ~138 MB</td></tr>
+</table>
+
+<hr>
+
+<h2>Architecture</h2>
+
+<p><strong>Capture is interception, not scraping.</strong> The extension hooks the page&#x27;s</p>
+<p><code>XMLHttpRequest</code> and matches the GraphQL operation name — <code>Bookmarks</code> for the</p>
+<p>timeline, <code>TweetDetail</code> for threads. Three things were established the hard way</p>
+<p>and must not be undone:</p>
+
+<li>A normal content script runs in an <strong>isolated world</strong> and its <code>window</code> is not the page&#x27;s, so patching XHR there catches nothing. The interceptor must be a <code>&quot;world&quot;: &quot;MAIN&quot;</code> content script.</li>
+<li><strong>Inline <code>&lt;script&gt;</code> injection does not execute on x.com</strong> (CSP). MAIN-world manifest registration is the only route; Firefox MV2 would use <code>wrappedJSObject</code>, userscripts use <code>unsafeWindow</code>.</li>
+<li><strong>X uses XHR, not <code>fetch</code>.</strong> Patching <code>fetch</code> catches nothing.</li>
+<li><strong>Content-script <code>fetch</code> to <code>localhost</code> is refused</strong> in MV3 — a simple GET slips through, but any preflighted POST from an https page to a loopback address is blocked before the server sees it. All network calls go through the <strong>service worker</strong>, which runs under the extension&#x27;s own host permissions.</li>
+
+<p><strong>Parsing happens server-side, in Python</strong>, from the <em>raw</em> response. When X</p>
+<p>renames a field the fix is a server edit and a re-parse, not an extension</p>
+<p>release. Unparsable payloads are saved to <code>unparsed/</code> so they can be replayed</p>
+<p>offline.</p>
+
+<p><strong>Scheduling is <code>chrome.alarms</code> in the service worker</strong>, not a page timer. A</p>
+<p>page <code>setTimeout</code> only fires while that exact tab is open and unfrozen — that</p>
+<p>mistake silently skipped 7 September. The alarm wakes hourly, acts when a sync</p>
+<p>is ~20h overdue, opens a background tab if none exists, and closes it after.</p>
+<p>A watchdog abandons any run that has not reported back in 30 minutes.</p>
+
+<p><strong><code>/i/bookmarks</code> now 302s to <code>/i/history</code></strong>, but the GraphQL operation was <em>not</em></p>
+<p>renamed with the route. Match the operation, not the path; both paths are handled.</p>
+
+<hr>
+
+<h2>Files</h2>
+
+<table>
+<tr><td>File</td><td></td></tr>
+<tr><td><code>server.py</code></td><td>Flask: ingest, find, article viewer, topics, tags, removal, thread queue</td></tr>
+<tr><td><code>store.py</code></td><td>SQLite schema, migrations, <code>find()</code>, tombstones, threads</td></tr>
+<tr><td><code>parse.py</code></td><td>GraphQL → records. Pure, no I/O. <code>parse_thread</code> keeps author-only replies</td></tr>
+<tr><td><code>app.html</code></td><td>The UI. Plain file, editable without restarting</td></tr>
+<tr><td><code>resolve_links.py</code></td><td>Follows shorteners to real destinations</td></tr>
+<tr><td><code>enrich_links.py</code></td><td>Fetches title + publication date only</td></tr>
+<tr><td><code>archive_links.py</code></td><td>direct + Wayback archiving, <code>extract()</code>, <code>classify()</code>, <code>is_video()</code></td></tr>
+<tr><td><code>topics.py</code></td><td>Two-pass LLM classification (DeepSeek)</td></tr>
+<tr><td><code>export_links.py</code></td><td>CSV + HTML exports, and the <code>link_export</code> SQL view</td></tr>
+<tr><td><code>export_unrecovered.py</code></td><td>The TODO-1 worklist, grouped by domain</td></tr>
+<tr><td><code>extension/</code></td><td>MV3: <code>interceptor.js</code> (MAIN), <code>bridge.js</code> (isolated), <code>background.js</code> (worker)</td></tr>
+<tr><td><code>start-collector.vbs</code>, <code>start.bat</code></td><td>Launch with no console window</td></tr>
+</table>
+
+<p><code>DEEPSEEK_API_KEY</code> is a persistent user environment variable. Only DeepSeek is</p>
+<p>configured — no Anthropic or OpenAI key.</p>
+
+<hr>
+
+<h2>Traps that have already cost time</h2>
+
+<p><strong>Found on the night of 12–13 September:</strong></p>
+
+<li><strong>Lock contention drops bookmarks silently.</strong> <code>transcripts.py</code> committed every 5 videos at ~30s each, holding a write transaction for ~2½ minutes, while the server had SQLite&#x27;s 5s default timeout. Result: 32 × <code>database is locked</code> and 500s on <code>/api/ingest</code> — bookmarks not captured. Fixed with commit-per-row and <code>PRAGMA busy_timeout = 30000</code> in <code>store.py</code>. **Any new pass must commit per row and set a busy timeout. Never run two sessions writing this DB at once.**</li>
+<li><strong><code>ask(kind, body)</code> silently dropped extra fields.</strong> The thread post never sent <code>root</code>, so the server got <code>root=undefined</code>, never marked the tweet fetched, and the pass reloaded one permalink forever. Fixed; the queue now also <strong>counts attempts at hand-out</strong> (max 2), plus a 45s stall timeout and a same-URL guard, so no single tweet can stall the pass again.</li>
+<li><strong>Ordering by <code>reply_count</code> picks viral tweets, not threads.</strong> The first offer was a 13,940-reply post whose page froze the renderer. Now: self-declared threads first (🧵, &quot;1/&quot;, &quot;a thread&quot;), and <code>reply_count &lt; 5000</code> excluded.</li>
+<li><strong>Mneme&#x27;s server has the same command line.</strong> Both run as <code>python server.py</code> with relative paths, so killing by command line would take down Mneme on</li>
+<li>Find the owner of <strong>8502</strong> with <code>netstat -ano</code> and kill only that PID and its parent.</li>
+<li><strong>A failed call looked like an empty queue.</strong> &quot;no threads queued&quot; fired on errors too. The panel now says <code>server error N</code> or <code>server unreachable</code>.</li>
+<li><strong>Buffered logs hide deaths.</strong> The transcript pass died after 5 videos with an empty log. Run passes with <code>python -u</code> and write an exit marker.</li>
+
+<p><strong>Earlier:</strong></p>
+
+<li><strong>cp1253 kills the server on startup.</strong> The banner prints box-drawing characters; launched from the login script, stdout is a redirected file in the legacy Greek codepage, and the <code>UnicodeEncodeError</code> kills the process *before it binds the port*. It looked exactly like &quot;no new bookmarks&quot; for two days. <code>sys.stdout.reconfigure(encoding=&quot;utf-8&quot;, errors=&quot;replace&quot;)</code> is at the top of <code>server.py</code> — keep it in anything new that prints.</li>
+<li><strong><code>Get-NetTCPConnection</code> is unreliable on this machine.</strong> It reports nothing while the port is plainly serving. Use <code>netstat -ano</code>. Trusting it once caused me to kill the running server.</li>
+<li>**PowerShell <code>*&gt;</code> writes UTF-16 logs.** A <code>grep</code> for a completion line in such a log never matches, which left a background waiter spinning forever. Use <code>| Out-File -Encoding utf8</code>.</li>
+<li><strong>archive.org has rate-limited this machine before.</strong> Wayback pacing (8s, a longer pause every fifth, exponential backoff on 403) is not tunable downward. The dead links exist <em>only</em> there.</li>
+<li><strong>Removal must be a tombstone.</strong> The tweet is still bookmarked on x.com, so a hard delete is silently undone by the next sync. <code>tweets.deleted</code> + skip in <code>upsert_tweets</code>.</li>
+<li><strong>A shorter capture must never overwrite a longer one</strong>, or re-running the collector destroys text an expansion pass recovered.</li>
+<li><strong>t.co returns HTTP 200, not a 3xx.</strong> The destination is in a meta-refresh and a JS <code>location.replace</code>. A redirect-only resolver marks every t.co link &quot;resolved to itself&quot; — which the first pass did.</li>
+
+<hr>
+
+<h2>Known limitations, stated plainly</h2>
+
+<li><strong>Bookmark dates for the 27,000 backfilled tweets are all 2026-09-05.</strong> X does not say when a bookmark was made. Recent filters (24h/3d/7d/month) become accurate as that date recedes, but the historical distribution never will — you cannot ask &quot;what did I bookmark in March 2024&quot;. <strong>Possible fix:</strong> timeline entries carry a snowflake-shaped <code>sortIndex</code>; one decoded to 2023-04-23, plausible for the oldest bookmark. Columns <code>tweets.sort_index</code> / <code>bookmarked_at</code> exist and are empty. Needs the interceptor to record <code>sortIndex</code> plus one full re-scrape (~18h, idempotent). Validity test: a bookmark cannot predate its tweet. <strong>Unverified hypothesis.</strong></li>
+<li><strong>Thread detection under-counts.</strong> <code>is_thread</code> fires on tweets that are <em>replies</em>, but the commonest bookmark is a thread&#x27;s <em>opener</em>, which is indistinguishable from a standalone tweet in the payload. The queue unions that flag with text markers (🧵, &quot;1/&quot;, &quot;a thread&quot;). It is a heuristic.</li>
+<li><strong>The parser was written against a synthetic payload</strong> — the real <code>Bookmarks</code> shape was never directly observed, because Chrome&#x27;s devtools bridge does not surface these XHRs (x.com runs a service worker). It handled 27,000 real tweets with one quarantined payload, which turned out to be the end-of-timeline marker. <code>test_parse.py</code> is a regression net, not proof.</li>
+<li><strong>Hard paywalls are genuinely lost to automation.</strong> Only 25% of <code>http401</code> were recovered; the Wayback crawler hits the same wall. TODO-1 is the answer.</li>
+<li><strong>&quot;Caught up&quot; is a heuristic</strong> — 3 barren pages, ~75 tweets past the last new one. Verified once with the <code>Deep</code> button (walks ~1,000 deep): found 0 new, so the shortcut is sound. Worth re-running monthly as a drift check.</li>
+
+<hr>
+
+<h2>Running it</h2>
+
+<pre>
+python server.py                  # or start.bat, or the Startup shortcut
+</pre>
+
+<p>Then <code>http://localhost:8502</code>. The minimal earlier UI is at <code>/simple</code>.</p>
+
+<p>Extension: <code>chrome://extensions</code> → Developer mode → <strong>Load unpacked</strong> →</p>
+<p><code>xcollector/extension</code>. Then <code>x.com/i/history</code> shows a panel bottom-right with</p>
+<p><strong>Start</strong> (sync), <strong>Deep</strong> (ignore the caught-up shortcut), <strong>Threads</strong> (the</p>
+<p>conversation pass).</p>
+
+<p>Passes, in the order they were meant to run:</p>
+
+<pre>
+python resolve_links.py      # shorteners → real URLs
+python enrich_links.py       # title + publication date
+python archive_links.py      # direct + Wayback
+python topics.py --assign    # classify new arrivals
+python export_links.py       # CSV + HTML
+python export_unrecovered.py # the worklist
+</pre>
+
+<p>All are resumable and skip what they have already done, so re-running after a</p>
+<p>sync only touches new material. None of them is scheduled yet — **worth wiring</p>
+<p>into the same <code>chrome.alarms</code> cadence, or a Windows task**, because right now</p>
+<p>they drift until run by hand.</p>

@@ -1,0 +1,71 @@
+<!doctype html><meta charset="utf-8"><title>Xplore — handoff supplement 1</title>
+<style>:root{color-scheme:light dark;--line:#8883}
+body{font:15.5px/1.62 system-ui,-apple-system,"Segoe UI",sans-serif;margin:0 auto;padding:34px 24px 70px;max-width:820px}
+h1{font-size:24px;margin:0 0 12px}h2{font-size:18px;margin:30px 0 8px;padding-bottom:5px;border-bottom:1px solid var(--line)}
+code{font:13px ui-monospace,Consolas,monospace;background:#8881;padding:1px 5px;border-radius:4px}
+li{margin:7px 0 7px 20px}table{border-collapse:collapse;margin:12px 0}
+td{border:1px solid var(--line);padding:5px 12px;font-size:14px}tr:first-child td{font-weight:600}
+hr{border:0;border-top:1px solid var(--line);margin:26px 0}</style>
+<h1>Xplore handoff — supplement 1 (night of 12–13 September)</h1>
+
+<p>Read this <em>after</em> <code>HANDOFF.md</code>. It only covers what changed after the fork started. Nothing here replaces the main note.</p>
+
+<hr>
+
+<h2>1. NEW — the thread pass crashes with &quot;Out of Memory&quot;  ← fix before resuming it</h2>
+
+<p><strong>Symptom.</strong> The Chrome tab running the thread pass dies on Chrome&#x27;s crash page with error code <strong>Out of Memory</strong>. Reloading the tab resumes the pass (the queue lives on the server), but nothing reloads it automatically.</p>
+
+<p><strong>Evidence, measured at 23:50 UTC.</strong> The pass runs in bursts of about 20 minutes, then crashes:</p>
+
+<table>
+<tr><td>Burst</td><td>Threads</td><td>Duration</td></tr>
+<tr><td>1</td><td>57</td><td>22 min</td></tr>
+<tr><td>2</td><td>36</td><td>19 min</td></tr>
+<tr><td>3</td><td>88</td><td>19 min</td></tr>
+<tr><td>4</td><td>103</td><td>24 min, still running</td></tr>
+</table>
+
+<p>At that point one Chrome process was using <strong>1,224 MB</strong>, far more than any other (the next was 390 MB). The machine still had <strong>3.1 GB free of 15.3 GB</strong>. So this is one page&#x27;s process running out of memory, not the PC running out.</p>
+
+<p><strong>Likely cause — now strongly supported.</strong> The pass moves between tweets with <code>location.href</code>, which is a same-site navigation. Chrome usually keeps the same renderer process for those, so whatever X&#x27;s app and its video players leave behind builds up across hundreds of hops. <strong>Checked two minutes later:</strong> the same process (same PID) had grown from 1,224 MB to <strong>1,735 MB</strong> while the pass moved through about seven more tweets. One process growing steadily across navigations is exactly the pattern this explanation predicts.</p>
+
+<p><strong>Why the existing safeguards don&#x27;t catch it.</strong> A crashed tab runs no code, so the 45-second stall timeout in <code>bridge.js</code> never fires. The pass just stops, and stays stopped until someone reloads the tab.</p>
+
+<p><strong>Fix: three parts, one extension reload.</strong></p>
+
+<li><strong>The service worker drives the pass, not the page.</strong> Store the thread tab&#x27;s id in <code>chrome.storage</code>. The page reports &quot;done&quot; to the worker, and the worker navigates that tab to the next tweet. This also fixes the **same-profile hijack** (HANDOFF TODO 4a): other tabs no longer pick up thread mode, because only the stored tab id is driven.</li>
+<li><strong>Recycle the tab regularly.</strong> Every <strong>~25 threads</strong> (well under the smallest burst of 36), the worker closes the tab and opens a fresh one with <code>chrome.tabs.create({active: false})</code>, which gets a new renderer process. Keep only one x.com tab open during a run, or Chrome may reuse an existing process for the new tab.</li>
+<li><strong>Heartbeat watchdog.</strong> The page pings the worker on every tweet. An alarm every minute (MV3&#x27;s minimum is 30 seconds) checks the last ping. If thread mode is on and there&#x27;s been no ping for 3 minutes, it recreates the tab. That catches crashes the recycling doesn&#x27;t prevent.</li>
+
+<p><strong>Cheap mitigation, no code.</strong> In X&#x27;s settings, turn video autoplay off (Accessibility, display and languages → Data usage → Autoplay → Never). Videos inside threads are the most likely thing piling up memory. It&#x27;s the owner&#x27;s account setting, so the owner should make the change.</p>
+
+<p><strong>Until it&#x27;s fixed:</strong> reload the crashed tab. At the current rate each reload gets about 100 threads before the next crash.</p>
+
+<p><strong>STATUS, 13 September: implemented in the original session. Do not rebuild.</strong></p>
+
+<li><code>background.js</code> now runs the pass (<code>threadStart</code>, <code>threadAdvance</code>, <code>threadDone</code>, <code>threadEnd</code>, <code>openThreadUrl</code>, and the alarm <code>xbc-thread-watch</code>). <code>bridge.js</code> only captures a tweet&#x27;s conversation, posts it, and reports back. The old <code>threadMode</code> flag is deleted when the extension installs.</li>
+<li>The tab is recycled every 25 tweets. If the page goes silent for 3 minutes, the watchdog retries the same tweet once in a fresh tab, then skips it.</li>
+<li><strong>One more bug was found in review and fixed before release.</strong> A fresh tab has to be opened blank and recorded as the run&#x27;s tab <em>before</em> it navigates. Otherwise its page asks &quot;am I the run&#x27;s tab?&quot; too early, gets told no, and sits idle until the watchdog fires: a 3-minute stall on every recycle.</li>
+<li><strong>Verified:</strong> both files parse (0 errors), and a simulated 60-tweet run with fake tabs, storage and server passed <strong>14/14</strong>: recycle timing, the blank-then-record-then-navigate order, other tabs ignored, completion, the watchdog&#x27;s retry-then-skip, and stop. **Not yet confirmed on the live site at the time of writing.** The live check is that the largest Chrome process changes PID roughly every 25 tweets instead of growing.</li>
+<li><strong>After any extension reload, the run switches off.</strong> Open <code>x.com/i/history</code> and press <strong>Threads</strong> again.</li>
+
+<hr>
+
+<h2>2. Also changed in <code>HANDOFF.md</code> after the fork started</h2>
+
+<p>If the fork read <code>HANDOFF.md</code> before about 23:00 UTC on 12 September, these edits are new. Full text is in its <strong>Traps</strong> section and <strong>Current state</strong> table.</p>
+
+<li><strong>Lock contention was dropping bookmarks.</strong> A background pass held a write lock for about 2½ minutes, and the server had only SQLite&#x27;s 5-second default timeout: 32 × <code>database is locked</code>, and 500 errors on <code>/api/ingest</code>. Fixed with a commit per row and <code>PRAGMA busy_timeout = 30000</code>. New passes must do both. Don&#x27;t run two sessions writing <code>xbookmarks.db</code> at once.</li>
+<li><strong>The thread pass looped forever on one tweet</strong> because <code>ask()</code> dropped the <code>root</code> field, so the server received <code>root=undefined</code>. Fixed. The queue now counts attempts as it hands tweets out (max 2); there&#x27;s also a 45-second stall timeout and a guard against reloading the same URL.</li>
+<li><strong>Ordering by <code>reply_count</code> picked viral tweets.</strong> The first one, with 13,940 replies, froze the page. The queue now takes self-declared threads first and excludes tweets with 5,000 or more replies.</li>
+<li><strong>Mneme&#x27;s server has the same command line</strong> (<code>python server.py</code>, relative path). Find what&#x27;s listening on 8502 with <code>netstat -ano</code>. Never kill processes by command line.</li>
+<li><strong>The panel no longer reports errors as an empty queue.</strong> It now says <code>server error N</code> or <code>server unreachable</code>.</li>
+<li><strong>Run passes unbuffered</strong> (<code>python -u</code>) and write an exit marker. The first transcript run died with an empty log.</li>
+<li><strong>Transcripts are done:</strong> 102 of 150, 629,222 words. <code>VIDEO_HOSTS</code> is too broad: <code>odysee.com/</code> also matches channel pages, which yt-dlp can&#x27;t read.</li>
+
+<hr>
+
+<h2>3. Thread pass status at 23:50 UTC</h2>
+
+<p>284 fetched · <strong>275 real threads</strong> · <strong>3,314 of the authors&#x27; own replies</strong> · about 1,900 left at 4 a minute, <em>when it isn&#x27;t crashing</em>.</p>

@@ -1,0 +1,420 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>X Bookmarks</title>
+<!--
+  app.html — the collection's own interface.
+
+  Search: one box covers two indexes, the tweets and the archived text of the
+  articles they link to. A hit in an article surfaces the tweet that pointed at
+  it, because the tweet is the thing that was bookmarked.
+
+  Recover: the articles the archiver could not reach. Opening one on
+  archive.today and passing its security check is enough -- the extension's
+  capture.js saves the text back here.
+
+  Kept as a plain file so it can be edited without restarting the server.
+-->
+<style>
+ :root{
+   color-scheme:light dark;
+   --line:#8883; --dim:#8888; --accent:#3b82f6; --ok:#16a34a; --amber:#d97706;
+ }
+ *{box-sizing:border-box}
+ [hidden]{display:none!important}
+ body{font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;
+   margin:0 auto;padding:24px 20px 60px;max-width:1000px}
+ h1{font-size:19px;margin:0}
+ .top{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:3px}
+ .sub{color:var(--dim);font-size:12.5px;margin-bottom:16px}
+ .warn{font-size:12.5px;border:1px solid #f59e0b66;background:#f59e0b14;
+   border-radius:8px;padding:8px 11px;margin-bottom:16px;color:inherit}
+
+ /* controls */
+ .bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+ input,select,button{font:inherit;color:inherit;background:transparent;
+   border:1px solid var(--line);border-radius:8px;padding:7px 10px}
+ #q{flex:1;min-width:240px;font-size:15px}
+ button{cursor:pointer}
+ button:hover{border-color:var(--accent)}
+ .seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+ .seg button{border:0;border-radius:0;padding:7px 11px;font-size:13px;opacity:.65}
+ .seg button.on{background:var(--accent);color:#fff;opacity:1}
+ .seg button b{font-weight:600;margin-left:3px}
+ .chips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+ .chip{font-size:12px;border:1px solid var(--line);border-radius:99px;
+   padding:3px 10px;cursor:pointer}
+ .chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+ #custom{display:none;gap:6px;align-items:center;font-size:12.5px;
+   color:var(--dim);margin-bottom:14px}
+ #custom.show{display:flex}
+
+ /* results */
+ .count{font-size:12.5px;color:var(--dim);margin:4px 0 6px}
+ .tw{border-top:1px solid var(--line);padding:14px 0}
+ .hd{display:flex;gap:8px;flex-wrap:wrap;align-items:baseline;font-size:12.5px}
+ .who{font-weight:600;font-size:14px}
+ .who a{color:inherit;text-decoration:none}
+ .who a:hover{text-decoration:underline}
+ .when{color:var(--dim)}
+ .tag,.tp{font-size:11px;border:1px solid var(--line);border-radius:99px;
+   padding:1px 8px;color:var(--dim);cursor:pointer}
+ .tp{border-color:var(--accent);color:var(--accent)}
+ .txt{white-space:pre-wrap;margin:6px 0 4px}
+ .quote{border-left:2px solid var(--line);padding-left:10px;margin:6px 0;
+   color:var(--dim);white-space:pre-wrap;font-size:14px}
+ .lk{font-size:13px;margin:5px 0 0;padding-left:12px;
+   border-left:2px solid var(--accent)}
+ .lk a{color:var(--accent);text-decoration:none}
+ .lk a:hover{text-decoration:underline}
+ .lk .meta{color:var(--dim);font-size:11.5px}
+ .badge{font-size:10.5px;border-radius:99px;padding:1px 7px;margin-left:6px;
+   border:1px solid var(--line);color:var(--dim)}
+ .badge.ok{border-color:var(--ok);color:var(--ok)}
+ .badge.warn{border-color:var(--amber);color:var(--amber)}
+ .more{display:block;width:100%;margin-top:18px;padding:9px}
+ .empty{color:var(--dim);padding:26px 0}
+ mark{background:#fde68a;color:#000;border-radius:2px}
+
+ /* recover */
+ .intro{font-size:13.5px;margin:0 0 14px;max-width:760px}
+ .intro ol{margin:6px 0 0;padding-left:20px}
+ .done{font-size:12.5px;border:1px solid #16a34a55;background:#16a34a12;
+   border-radius:8px;padding:8px 11px;margin-bottom:14px}
+ .done a{color:var(--accent);text-decoration:none}
+ .rw{border-top:1px solid var(--line);padding:12px 0}
+ .rw .title{font-weight:560;color:inherit;text-decoration:none;font-size:15px}
+ .rw .title:hover{text-decoration:underline}
+ .rw .meta{color:var(--dim);font-size:12px;margin-top:2px}
+ .rw .meta a{color:var(--accent);text-decoration:none}
+ .rw.opened{opacity:.6}
+ .rw.saved{opacity:.45}
+ .go{display:inline-block;margin-top:6px;font-size:12.5px;border:1px solid var(--accent);
+   color:var(--accent);border-radius:7px;padding:3px 10px;text-decoration:none}
+ .go:hover{background:var(--accent);color:#fff}
+</style>
+
+<div class="top">
+  <h1>X Bookmarks</h1>
+  <div class="seg" id="viewseg">
+    <button data-view="search" class="on">Search</button>
+    <button data-view="recover">Recover<b id="recN"></b></button>
+  </div>
+</div>
+<div class="sub" id="head">loading…</div>
+
+<section id="v-search">
+  <div class="warn" id="datewarn" hidden></div>
+
+  <div class="bar">
+    <input id="q" placeholder="Search tweets and archived articles…" autofocus>
+    <div class="seg" id="sortseg">
+      <button data-sort="bookmarked" class="on">by bookmarked</button>
+      <button data-sort="posted">by posted</button>
+    </div>
+    <select id="archive">
+      <option value="">any</option>
+      <option value="links">has links</option>
+      <option value="yes">has archived text</option>
+    </select>
+  </div>
+
+  <div class="chips" id="times"></div>
+  <div id="custom">
+    from <input type="date" id="cf"> to <input type="date" id="ct">
+    <button id="capply">apply</button>
+  </div>
+  <div class="chips" id="topics"></div>
+  <div class="chips" id="tags"></div>
+
+  <div class="count" id="count"></div>
+  <div id="list"></div>
+  <button class="more" id="more" hidden>Load more</button>
+</section>
+
+<section id="v-recover" hidden>
+  <div class="intro">
+    Articles the archiver could not reach: paywalls, bot walls, hosts that no
+    longer answer. Many still exist on archive.today, which only a person can
+    get past.
+    <ol>
+      <li>Open one with <b>open on archive.today</b>.</li>
+      <li>Pass the security check.</li>
+      <li>The Xplore extension saves the text here by itself, and confirms it in
+          the corner of that page.</li>
+    </ol>
+  </div>
+  <div class="done" id="rec-done" hidden></div>
+  <div class="chips" id="rec-domains"></div>
+  <div class="count" id="rec-count"></div>
+  <div id="rec-list"></div>
+  <button class="more" id="rec-more" hidden>Load more</button>
+</section>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = t => (t || "").replace(/[<>&"]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
+
+const RANGES = [["", "all time"], ["1", "24 hours"], ["3", "3 days"],
+                ["7", "7 days"], ["30", "month"], ["custom", "custom…"]];
+
+const state = { q: "", since: "", from: "", to: "", sort: "bookmarked",
+                topic: "", tag: "", archive: "", offset: 0 };
+
+/* Highlight the query terms in whatever text we show. Cheap, and it is the
+   difference between "this matched somehow" and seeing why. */
+function hi(text, q) {
+  let out = esc(text);
+  const terms = (q || "").split(/\s+/).filter(w => w.length > 2);
+  for (const w of terms) {
+    try {
+      out = out.replace(new RegExp("(" + w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ")", "gi"),
+                        "<mark>$1</mark>");
+    } catch (e) {}
+  }
+  return out;
+}
+
+function buildChips() {
+  $("#times").innerHTML = RANGES.map(([v, label]) =>
+    `<span class="chip${(state.since === v && v !== 'custom') ? ' on' : ''}" data-r="${v}">${label}</span>`).join("");
+  $("#times").querySelectorAll(".chip").forEach(c => c.onclick = () => {
+    const v = c.dataset.r;
+    if (v === "custom") { $("#custom").classList.add("show"); return; }
+    $("#custom").classList.remove("show");
+    state.since = v; state.from = state.to = ""; state.offset = 0;
+    buildChips(); load(true);
+  });
+}
+
+async function facets() {
+  const [tp, tg] = await Promise.all([
+    fetch("/api/topics").then(r => r.json()),
+    fetch("/api/tags").then(r => r.json()),
+  ]);
+  $("#topics").innerHTML = tp.topics.slice(0, 18).map(t =>
+    `<span class="chip${state.topic === t.topic ? ' on' : ''}" data-t="${esc(t.topic)}">${esc(t.topic)} <b>${t.n}</b></span>`).join("");
+  $("#topics").querySelectorAll(".chip").forEach(c => c.onclick = () => {
+    state.topic = state.topic === c.dataset.t ? "" : c.dataset.t;
+    state.offset = 0; facets(); load(true);
+  });
+  $("#tags").innerHTML = (tg.tags || []).slice(0, 24).map(t =>
+    `<span class="chip${state.tag === t.tag ? ' on' : ''}" data-g="${esc(t.tag)}">#${esc(t.tag)} <b>${t.n}</b></span>`).join("");
+  $("#tags").querySelectorAll(".chip").forEach(c => c.onclick = () => {
+    state.tag = state.tag === c.dataset.g ? "" : c.dataset.g;
+    state.offset = 0; facets(); load(true);
+  });
+}
+
+function renderTweet(t) {
+  const when = state.sort === "bookmarked"
+    ? `bookmarked ${(t.added_at || "").slice(0, 10)}`
+    : `posted ${(t.created_at || "").slice(0, 10)}`;
+  const links = (t.links || []).map(l => {
+    const archived = l.archive_status === "ok";
+    const target = archived
+      ? `/article?url=${encodeURIComponent(l.url)}`
+      : l.url;
+    const host = (l.url || "").split("://").pop().split("/")[0].replace(/^www\./, "");
+    return `<div class="lk">
+      <a href="${esc(target)}" target="_blank" rel="noopener">${esc(l.title || l.url)}</a>
+      <span class="badge${archived ? " ok" : ""}">${archived ? "archived · " + (l.words || 0) + "w" : (l.archive_status || "not archived")}</span>
+      <div class="meta">${esc(host)}${l.article_date ? " · " + esc(l.article_date) : ""}
+        ${archived ? ` · <a href="${esc(l.url)}" target="_blank" rel="noopener">original</a>` : ""}</div>
+    </div>`;
+  }).join("");
+  return `<div class="tw">
+    <div class="hd">
+      <span class="who"><a href="${esc(t.url)}" target="_blank" rel="noopener">@${esc(t.author_handle || "?")}</a></span>
+      <span class="when">${when}</span>
+      ${t.topic ? `<span class="tp" data-t="${esc(t.topic)}">${esc(t.topic)}</span>` : ""}
+      ${(t.tags || []).map(g => `<span class="tag" data-g="${esc(g)}">#${esc(g)}</span>`).join("")}
+      ${t.is_thread ? '<span class="tag">thread</span>' : ""}
+      ${t.truncated ? '<span class="tag">truncated</span>' : ""}
+    </div>
+    <div class="txt">${hi(t.text || "", state.q)}</div>
+    ${t.quoted_text ? `<div class="quote">${hi(t.quoted_text, state.q)}</div>` : ""}
+    ${links}
+  </div>`;
+}
+
+let busy = false;
+async function load(reset) {
+  if (busy) return;
+  busy = true;
+  if (reset) { state.offset = 0; $("#list").innerHTML = ""; }
+  const p = new URLSearchParams({ limit: 40, offset: state.offset, sort: state.sort });
+  for (const k of ["q", "topic", "tag", "archive"]) if (state[k]) p.set(k, state[k]);
+  if (state.since) p.set("since", state.since);
+  if (state.from) p.set("from", state.from);
+  if (state.to) p.set("to", state.to);
+
+  const r = await (await fetch("/api/find?" + p)).json();
+  $("#count").textContent =
+    `${r.total.toLocaleString()} matching tweet${r.total === 1 ? "" : "s"}`
+    + (state.q ? ` for “${state.q}”` : "");
+  $("#list").insertAdjacentHTML("beforeend",
+    r.results.map(renderTweet).join("") ||
+    (state.offset ? "" : '<div class="empty">Nothing matches.</div>'));
+  state.offset += r.results.length;
+  $("#more").hidden = state.offset >= r.total;
+
+  // Clicking a topic or tag inside a result filters by it.
+  $("#list").querySelectorAll(".tp").forEach(e => e.onclick = () => {
+    state.topic = e.dataset.t; facets(); load(true);
+  });
+  $("#list").querySelectorAll(".tag[data-g]").forEach(e => e.onclick = () => {
+    state.tag = e.dataset.g; facets(); load(true);
+  });
+  busy = false;
+}
+
+async function header() {
+  const s = await (await fetch("/api/stats")).json();
+  $("#head").textContent =
+    `${s.tweets.toLocaleString()} tweets · ${s.uniqueLinks.toLocaleString()} links · `
+    + `${s.authors.toLocaleString()} authors · local database, port 8502`;
+  // The honest caveat, shown only while it applies: a tweet whose bookmark
+  // time has not been recovered from x.com's sortIndex falls back to the day
+  // we first saw it, which for the initial import is one shared date.
+  const w = $("#datewarn");
+  w.hidden = !s.undated;
+  if (s.undated) w.innerHTML = "<b>Note on “bookmarked” dates:</b> "
+    + `${s.undated.toLocaleString()} tweets have no recovered bookmark time yet `
+    + "and use the day they were first captured instead. A Deep scan on "
+    + "x.com/i/history fills them in. <i>Posted</i> is accurate for everything.";
+}
+
+/* ── recover ──────────────────────────────────────────────────────────────── */
+
+// Why each one is on the list, in words rather than status codes.
+const REASON = { thin: "paywall teaser", botscreen: "bot wall" };
+const META_REASON = {
+  http401: "hard paywall", http402: "paywall", http403: "bot-blocked",
+  http404: "gone", http410: "removed", urlerror: "host gone",
+  timeouterror: "timed out", http429: "rate-limited", http503: "unavailable",
+};
+const reasonOf = it => REASON[it.status] || META_REASON[it.meta_status] || "not archived";
+
+const rec = { domain: "", offset: 0, busy: false };
+
+// Which archive links were opened this session, so a long list can be worked
+// down without losing your place. Per-viewer convenience only.
+function openedSet() {
+  try { return new Set(JSON.parse(sessionStorage.getItem("xp_opened") || "[]")); }
+  catch (e) { return new Set(); }
+}
+function markOpened(url) {
+  try {
+    const s = openedSet(); s.add(url);
+    sessionStorage.setItem("xp_opened", JSON.stringify([...s]));
+  } catch (e) {}
+}
+
+function renderRec(it, opened) {
+  return `<div class="rw${opened.has(it.url) ? " opened" : ""}" data-url="${esc(it.url)}">
+    <div class="hd">
+      <span class="who">${esc(it.domain)}</span>
+      <span class="badge warn">${esc(reasonOf(it))}</span>
+      <span class="when">${it.refs} bookmark${it.refs === 1 ? "" : "s"}${it.article_date ? " · " + esc(it.article_date) : ""}</span>
+    </div>
+    <div><a class="title" href="${esc(it.originalLink || it.url)}" target="_blank" rel="noopener">${esc(it.title || it.originalLink || it.url)}</a></div>
+    <div class="meta">${it.tweet_url ? `bookmarked via <a href="${esc(it.tweet_url)}" target="_blank" rel="noopener">@${esc(it.author || "?")}</a>` : ""}</div>
+    <a class="go" href="${esc(it.archiveLink)}" target="_blank" rel="noopener" data-url="${esc(it.url)}">open on archive.today →</a>
+  </div>`;
+}
+
+function renderDone(r) {
+  const d = $("#rec-done");
+  if (!r.recoveredTotal) { d.hidden = true; return; }
+  const last = r.recovered[0];
+  d.hidden = false;
+  d.innerHTML = `<b>${r.recoveredTotal.toLocaleString()} recovered so far.</b>`
+    + (last ? ` Latest: <a href="/article?url=${encodeURIComponent(last.url)}" target="_blank" rel="noopener">${esc(last.title || last.url)}</a> (${(last.word_count || 0).toLocaleString()} words)` : "");
+  // Anything recovered since the list was drawn is dimmed in place, rather than
+  // redrawing and losing the reader's position.
+  const saved = new Set(r.recovered.map(x => x.url));
+  document.querySelectorAll("#rec-list .rw").forEach(el => {
+    if (saved.has(el.dataset.url) && !el.classList.contains("saved")) {
+      el.classList.add("saved");
+      el.querySelector(".badge").textContent = "saved";
+      el.querySelector(".badge").className = "badge ok";
+    }
+  });
+}
+
+async function loadRecover(reset) {
+  if (rec.busy) return;
+  rec.busy = true;
+  if (reset) { rec.offset = 0; $("#rec-list").innerHTML = ""; }
+  const p = new URLSearchParams({ limit: 60, offset: rec.offset });
+  if (rec.domain) p.set("domain", rec.domain);
+  const r = await (await fetch("/api/capture/worklist?" + p)).json();
+
+  if (!rec.domain) $("#recN").textContent = " " + r.total.toLocaleString();
+  $("#rec-domains").innerHTML = r.domains.map(([d, n]) =>
+    `<span class="chip${rec.domain === d ? " on" : ""}" data-d="${esc(d)}">${esc(d)} <b>${n}</b></span>`).join("");
+  $("#rec-domains").querySelectorAll(".chip").forEach(c => c.onclick = () => {
+    rec.domain = rec.domain === c.dataset.d ? "" : c.dataset.d;
+    loadRecover(true);
+  });
+  $("#rec-count").textContent = `${r.total.toLocaleString()} article${r.total === 1 ? "" : "s"} to recover`
+    + (rec.domain ? ` from ${rec.domain}` : "") + " · most-bookmarked first";
+
+  const opened = openedSet();
+  $("#rec-list").insertAdjacentHTML("beforeend",
+    r.items.map(it => renderRec(it, opened)).join("") ||
+    (rec.offset ? "" : '<div class="empty">Nothing left to recover.</div>'));
+  rec.offset += r.items.length;
+  $("#rec-more").hidden = rec.offset >= r.total;
+  renderDone(r);
+  rec.busy = false;
+}
+
+// Returning from an archive.today tab: pick up what was saved meanwhile,
+// without redrawing the list.
+async function refreshRecover() {
+  const r = await (await fetch("/api/capture/worklist?limit=1")).json();
+  $("#recN").textContent = " " + r.total.toLocaleString();
+  renderDone(r);
+}
+
+function show(view) {
+  $("#viewseg").querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.view === view));
+  $("#v-search").hidden = view !== "search";
+  $("#v-recover").hidden = view !== "recover";
+  try { localStorage.setItem("xp_view", view); } catch (e) {}
+  if (view === "recover" && !$("#rec-list").children.length) loadRecover(true);
+}
+
+/* wiring */
+let timer;
+$("#q").addEventListener("input", () => {
+  clearTimeout(timer);
+  timer = setTimeout(() => { state.q = $("#q").value.trim(); load(true); }, 220);
+});
+$("#sortseg").querySelectorAll("button").forEach(b => b.onclick = () => {
+  $("#sortseg").querySelectorAll("button").forEach(x => x.classList.remove("on"));
+  b.classList.add("on");
+  state.sort = b.dataset.sort; load(true);
+});
+$("#archive").addEventListener("change", e => { state.archive = e.target.value; load(true); });
+$("#capply").onclick = () => {
+  state.from = $("#cf").value; state.to = $("#ct").value; state.since = "";
+  buildChips(); load(true);
+};
+$("#more").onclick = () => load(false);
+
+$("#viewseg").querySelectorAll("button").forEach(b => b.onclick = () => show(b.dataset.view));
+$("#rec-more").onclick = () => loadRecover(false);
+$("#rec-list").addEventListener("click", e => {
+  const a = e.target.closest(".go");
+  if (!a) return;
+  markOpened(a.dataset.url);
+  a.closest(".rw").classList.add("opened");
+});
+window.addEventListener("focus", () => { if (!$("#v-recover").hidden) refreshRecover(); });
+
+buildChips(); facets(); header(); load(true);
+refreshRecover().catch(() => {});
+try { if (localStorage.getItem("xp_view") === "recover") show("recover"); } catch (e) {}
+</script>

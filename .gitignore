@@ -1,0 +1,22 @@
+# Personal data: the bookmark database and everything derived from it.
+xbookmarks.db
+xbookmarks.db-*
+*.db
+*.db-shm
+*.db-wal
+unparsed/
+
+# Generated exports. They carry gift and access tokens copied out of shared
+# article links (FT accessToken, Washington Post pwapi_token), so they must
+# never be published.
+x-links*.csv
+x-links*.html
+
+# Run logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/

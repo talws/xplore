@@ -1,0 +1,68 @@
+{
+  "manifest_version": 3,
+  "name": "X Bookmark Collector",
+  "version": "0.1.0",
+  "description": "Capture your x.com bookmarks into a local database on port 8502. Nothing leaves this machine.",
+  "permissions": [
+    "alarms",
+    "tabs",
+    "storage",
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://x.com/*",
+    "https://twitter.com/*",
+    "http://localhost:8502/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": [
+        "interceptor.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": [
+        "bridge.js"
+      ],
+      "world": "ISOLATED",
+      "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "https://archive.ph/*",
+        "https://archive.is/*",
+        "https://archive.today/*",
+        "https://archive.li/*",
+        "https://archive.fo/*",
+        "https://archive.md/*",
+        "https://archive.vn/*"
+      ],
+      "js": [
+        "capture.js"
+      ],
+      "world": "ISOLATED",
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "icons": {
+    "16": "icon-16.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
+  }
+}
