@@ -38,6 +38,40 @@
       <input type="search" id="q" placeholder="Search tweets, threads and archived articles…" autocomplete="off" aria-label="Search">
     </div>
     <div id="header-stats"></div>
+    <button id="settings-btn" class="icon-btn" aria-label="AI settings" title="AI settings">
+      <svg viewBox="0 0 20 20" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3 5.5h8M15 5.5h2M3 14.5h2M9 14.5h8"/><circle cx="13" cy="5.5" r="2"/><circle cx="7" cy="14.5" r="2"/></svg>
+    </button>
+    <dialog id="settings" aria-labelledby="settings-title">
+      <div class="s-body">
+        <h2 id="settings-title">AI settings</h2>
+        <p class="s-intro">AI makes <b>Related</b> smarter: it widens what to look for (names, other language,
+          paraphrase) and judges what is really about the same thing. It uses your own API key, which stays on
+          this computer; the provider bills you for each use.</p>
+        <label class="s-field">Provider
+          <select id="s-provider"></select></label>
+        <div id="s-note" class="s-hint"></div>
+        <label class="s-field">API key
+          <input id="s-key" type="password" autocomplete="off" spellcheck="false"></label>
+        <div id="s-key-state" class="s-hint"></div>
+        <div class="s-row">
+          <label class="s-field">Fast model <input id="s-fast" spellcheck="false"></label>
+          <label class="s-field">Quality model <input id="s-quality" spellcheck="false"></label>
+        </div>
+        <div class="s-row">
+          <label class="s-field">Limit per request ($) <input id="s-per-request" type="number" min="0" max="100" step="0.01"></label>
+          <label class="s-field">Limit per day ($) <input id="s-per-day" type="number" min="0" max="100" step="0.05"></label>
+        </div>
+        <div id="s-spent" class="s-hint"></div>
+        <div id="s-msg" class="s-msg" aria-live="polite"></div>
+        <div class="s-actions">
+          <button type="button" id="s-test" class="btn">Save and test</button>
+          <button type="button" id="s-clear" class="btn danger" hidden>Remove saved key</button>
+          <span class="s-spacer"></span>
+          <button type="button" id="s-cancel" class="btn">Close</button>
+          <button type="button" id="s-save" class="btn primary">Save</button>
+        </div>
+      </div>
+    </dialog>
     <button id="theme" class="icon-btn" data-mode="system" aria-label="Theme: follows the system" title="Theme: follows the system">
       <svg class="t-system" viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 3a7 7 0 000 14z" fill="currentColor"/></svg>
       <svg class="t-light" viewBox="0 0 20 20" width="17" height="17" aria-hidden="true"><circle cx="10" cy="10" r="3.6" fill="currentColor"/><g stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M10 1.8v2.1M10 16.1v2.1M1.8 10h2.1M16.1 10h2.1M4.2 4.2l1.5 1.5M14.3 14.3l1.5 1.5M4.2 15.8l1.5-1.5M14.3 5.7l1.5-1.5"/></g></svg>

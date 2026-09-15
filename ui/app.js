@@ -4,6 +4,7 @@ import * as library from "./library.js";
 import * as recover from "./recover.js";
 import { closeDetail, initDetail, isOpen as detailOpen } from "./detail.js";
 import { openReader, closeReader, initReader } from "./reader.js";
+import "./settings.js";   // wires the AI settings dialog on import
 
 const VIEWS = ["library", "recover"];
 let view = "library";

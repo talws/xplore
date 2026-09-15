@@ -4,7 +4,7 @@ related.py — C1: bookmarks and links related to a bookmark, a page, or a text.
 Level 1 of the related-items engine (HANDOFF-PHASE-2 §C): no LLM, no key. The
 candidates come from signals the store already has, and every result says which
 signals fired. That keeps the ranking readable, and it is exactly the evidence
-an LLM re-rank (C2) will be given later; the owner wants that level eventually.
+an LLM re-rank (C2, ai_related.py) is given; the owner wants that level too.
 
 Signals and weights (list approved by the owner, 14 Sep):
 
@@ -44,6 +44,7 @@ FULL_SCORE = 8.0          # a score this high fills the bar
 MIN_MASS = 0.25           # share of the seed's word weight a candidate must have
 FULL_MASS = 0.6           # a share this high earns the whole words weight
 DF_CEILING = 0.03         # words in more than 3% of tweets say nothing about a subject
+SEED_TEXT_CHARS = 4000
 
 # Function words and generic vocabulary. The document-frequency ceiling catches
 # the commonest; these are the ones that slip under it in a 27,000-tweet corpus
@@ -57,7 +58,7 @@ for from further get gets give given going gone good got great had happen happen
 have having help her here hers herself him himself his how however into its itself just keep
 kind know last least less let like little long look looking lot made make many maybe mean
 means meant might more most much must myself need needs never new next not nothing now off
-often once one only other our ours out over own part people per place point put rather read
+often once one only other our ours out over own people per place point put rather read
 real really right said same say saying says see seems seen set she should show shows since
 some something still such sure take talk tell than thank thanks that the their theirs them
 then there these they thing things think this those though three through thus time today too
@@ -66,8 +67,8 @@ were what when where whether which while who whole whom whose why will with with
 won word words work would wrong year years yes yet you your yours amp https http www com
 rt lol que los las del por para con una uno como pero más mas les des est pour dans une qui
 sur pas par sont avec και του της των την τον στο στη στην στον στα στις στους από απο για
-που πωσ πως ότι οτι είναι ειναι δεν μην ένα ενα μια μία αλλά αλλα αυτό αυτο αυτή αυτη αυτά
-αυτα έχει εχει έχουν εχουν πιο όπωσ οπωσ όταν οταν μασ σασ τουσ τισ εδώ εδω εκεί εκει ήταν
+που πως ότι οτι είναι ειναι δεν μην ένα ενα μια μία αλλά αλλα αυτό αυτο αυτή αυτη αυτά
+αυτα έχει εχει έχουν εχουν πιο όπως οπως όταν οταν μας σας τους τις εδώ εδω εκεί εκει ήταν
 ηταν πολύ πολυ ακόμα ακομα
 """.replace("ς", "σ").split())    # folded like tokens(), or "της" never matches "τησ"
 
@@ -149,8 +150,10 @@ def _when(iso: str | None) -> dt.datetime | None:
 
 def related(store, tweet: str = "", url: str = "", q: str = "", window: int = 7,
             signals: set[str] | None = None, links_limit: int = 12,
-            tweets_limit: int = 30) -> dict | None:
-    """Related links and bookmarks for one seed: a tweet id, a page URL, or text."""
+            tweets_limit: int = 30, extra_terms: list[str] | None = None) -> dict | None:
+    """Related links and bookmarks for one seed: a tweet id, a page URL, or text.
+
+    `extra_terms` are more words to look for, from C2's query expansion."""
     t0 = time.time()
     db = store.db
     on = set(SIGNALS) if signals is None else set(signals) & set(SIGNALS)
@@ -176,7 +179,7 @@ def related(store, tweet: str = "", url: str = "", q: str = "", window: int = 7,
              WHERE l.tweet_id = ?""", (tweet,)).fetchall()
         seed_keys = {urls.match_key(r["url"]) for r in links if r["url"]}
         text = " ".join([row["text"] or "", row["quoted_text"] or ""]
-                        + [r["title"] or "" for r in links])[:4000]
+                        + [r["title"] or "" for r in links])[:SEED_TEXT_CHARS]
         seed = {"type": "tweet", "id": tweet}
     elif url:
         seed_keys = {urls.match_key(url)}
@@ -207,11 +210,33 @@ def related(store, tweet: str = "", url: str = "", q: str = "", window: int = 7,
 
     # words: tweets, then articles
     terms = pick_terms(store, text, strict=seed["type"] != "q")
+    # C2 query expansion: the model's keywords, names and translations widen
+    # the search. A candidate qualifies on its share of the seed's own words OR
+    # of the added ones, judged separately, so added words cannot dilute the
+    # seed's (a tweet sharing the seed's rare names still gets in).
+    added: dict[str, float] = {}
+    if extra_terms:
+        # Same commonness ceiling as the seed's own words: expanding "τσιπρας"
+        # also returned "ελλάδα" and "πολιτική", and with those admitted 395
+        # bookmarks matched on a single common word (15 Sep).
+        min_idf = math.log(1 / DF_CEILING)
+        added = {t: w for t, w in pick_terms(store, " ".join(extra_terms), strict=False,
+                                              max_terms=40).items()
+                 if t not in terms and w >= min_idf}
+    all_terms = {**terms, **added}
     # A one- or two-word query is all signal; a tweet's words need a real share.
     min_mass = MIN_MASS if seed["type"] != "q" or len(terms) > 2 else 0.0
+
+    def weigh(candidate_text: str) -> tuple[float, list[str]]:
+        mass, got = share(terms, candidate_text) if terms else (0.0, [])
+        if added:
+            mass2, got2 = share(added, candidate_text)
+            mass, got = max(mass, mass2), got + got2
+        return mass, got
+
     article_hits: list[tuple[str, float, list[str]]] = []
-    if terms and "words" in on:
-        match = " OR ".join(f'"{t}"' for t in terms)
+    if all_terms and "words" in on:
+        match = " OR ".join(f'"{t}"' for t in all_terms)
         hits = db.execute("SELECT rowid FROM tweets_fts WHERE tweets_fts MATCH ? "
                           "ORDER BY rank LIMIT 400", (match,)).fetchall()
         info = {r["rowid"]: r for r in store._in(
@@ -222,7 +247,7 @@ def related(store, tweet: str = "", url: str = "", q: str = "", window: int = 7,
             t = info.get(h[0])
             if not t:
                 continue
-            mass, got = share(terms, f"{t['text']} {t['quoted_text'] or ''}")
+            mass, got = weigh(f"{t['text']} {t['quoted_text'] or ''}")
             if not got or mass < min_mass:
                 continue
             s = words_score(mass, i, len(hits))
@@ -245,7 +270,7 @@ def related(store, tweet: str = "", url: str = "", q: str = "", window: int = 7,
             a = ainfo.get(h[0])
             if not a or urls.match_key(a["url"]) in seed_keys:
                 continue
-            mass, got = share(terms, f"{a['title'] or ''} {a['text'] or ''}")
+            mass, got = weigh(f"{a['title'] or ''} {a['text'] or ''}")
             if not got or mass < min_mass:
                 continue
             article_hits.append((a["url"], words_score(mass, i, len(ahits)), got))
@@ -266,7 +291,7 @@ def related(store, tweet: str = "", url: str = "", q: str = "", window: int = 7,
                 add(tid, "link", WEIGHTS["link"])
 
     if seed_row:
-        added = seed_row["added_at"]
+        added_at = seed_row["added_at"]
         # quote and thread
         if "quote" in on:
             for r in db.execute(f"""
@@ -283,7 +308,7 @@ def related(store, tweet: str = "", url: str = "", q: str = "", window: int = 7,
                 SELECT t.id FROM tweets t WHERE t.deleted = 0 AND {bm}
                    AND t.author_handle = ? AND t.id <> ?
                  ORDER BY abs(julianday(COALESCE(t.bookmarked_at, t.first_seen)) - julianday(?))
-                 LIMIT 15""", (seed_row["author_handle"], tweet, added)):
+                 LIMIT 15""", (seed_row["author_handle"], tweet, added_at)):
                 add(r[0], "author", WEIGHTS["author"])
         # tags
         if "tags" in on:
@@ -305,7 +330,7 @@ def related(store, tweet: str = "", url: str = "", q: str = "", window: int = 7,
                  WHERE t.deleted = 0 AND {bm} AND COALESCE(tp.topic_user, tp.topic) = ?
                    AND abs(julianday(COALESCE(t.bookmarked_at, t.first_seen)) - julianday(?)) <= ?
                  ORDER BY abs(julianday(COALESCE(t.bookmarked_at, t.first_seen)) - julianday(?))
-                 LIMIT 60""", (seed_row["topic"], added, window, added)):
+                 LIMIT 60""", (seed_row["topic"], added_at, window, added_at)):
                 add(r[0], "topic", WEIGHTS["topic"])
 
     # Keep bookmarks only; add topic and time to everything that came in.
@@ -378,6 +403,8 @@ def related(store, tweet: str = "", url: str = "", q: str = "", window: int = 7,
         if kind not in ("article", "video"):
             continue
         out_links.append({
+            # The page's stable key, as the test-set marks and eval_related.py use it.
+            "key": f"u:{k}",
             "url": c["url"], "host": host_of(c["url"]), "kind": kind,
             "title": (t["title"] if t and t["title"] else None) or (a["title"] if a else None),
             "article_date": t["article_date"] if t else None,
@@ -393,7 +420,8 @@ def related(store, tweet: str = "", url: str = "", q: str = "", window: int = 7,
     out_links.sort(key=lambda l: (l["archive_status"] != "ok", -l["score"]))
 
     return {
-        "seed": seed, "terms": list(terms), "window": window,
+        "seed": seed, "seed_text": text, "terms": list(terms), "added_terms": list(added),
+        "window": window,
         "signals": {s: sum(1 for c in cands.values() if s in c["parts"]) for s in SIGNALS},
         "total_tweets": len(cands), "total_links": len(link_c),
         "tweets": out_tweets, "links": out_links,

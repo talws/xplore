@@ -42,6 +42,9 @@ from store import Store, as_mneme
 from parse import parse_bookmarks_response, is_end_of_timeline, parse_thread
 import capture   # capture-on-view: /api/capture*, see capture.py
 import related   # C1 related items: /api/related, see related.py
+import ai_related  # C2: /api/related?ai=1, see ai_related.py
+import providers   # C2: LLM provider, key, cost and budget; /api/settings
+import eval_related  # C2: the owner's relevant / not marks; /api/gold
 
 app = Flask(__name__)
 app.register_blueprint(capture.bp)
@@ -311,7 +314,10 @@ def api_related():
     """
     a = request.args
     sig = (a.get("signals") or "").strip()
-    r = related.related(
+    # ?ai=1: C2 query expansion and re-rank on top (ai_related.py). Falls back
+    # to the plain result, with the reason in `ai.error`, when AI is unavailable.
+    engine = ai_related.related_ai if a.get("ai") in ("1", "true", "yes") else related.related
+    r = engine(
         store,
         tweet=(a.get("tweet") or "").strip(), url=(a.get("url") or "").strip(),
         q=(a.get("q") or "").strip(),
@@ -322,6 +328,67 @@ def api_related():
     if r is None:
         return jsonify({"error": "give a known ?tweet=, a ?url= or a ?q="}), 400
     return jsonify(r)
+
+
+def _same_origin() -> bool:
+    """Settings change what the app spends and which key it uses, so only the
+    app's own pages may call them. The CORS rule above lets x.com pages talk
+    to the ingest endpoints; it must not let them reach these."""
+    origin = request.headers.get("Origin")
+    return origin is None or origin.rstrip("/") == request.host_url.rstrip("/")
+
+
+@app.route("/api/settings")
+def api_settings():
+    """AI settings for the Settings panel. Never includes a key."""
+    return jsonify(providers.public_settings(store.db))
+
+
+@app.route("/api/settings", methods=["POST"])
+def api_settings_save():
+    if not _same_origin():
+        return jsonify({"error": "settings can only be changed from Xplore itself"}), 403
+    try:
+        providers.update_settings(request.get_json(silent=True) or {})
+    except providers.AIError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(providers.public_settings(store.db))
+
+
+@app.route("/api/settings/test", methods=["POST"])
+def api_settings_test():
+    """One tiny real call with the configured provider, key and fast model."""
+    if not _same_origin():
+        return jsonify({"error": "settings can only be tested from Xplore itself"}), 403
+    try:
+        return jsonify(providers.test_key(store.db))
+    except providers.AIError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/gold")
+def api_gold():
+    """The owner's relevant / not-relevant marks for one Related seed
+    (?tweet=, ?url= or ?q=). The test set eval_related.py scores."""
+    a = request.args
+    seed = {k: (a.get(k) or "").strip() for k in ("tweet", "url", "q") if (a.get(k) or "").strip()}
+    if not seed:
+        return jsonify({"error": "give ?tweet=, ?url= or ?q="}), 400
+    return jsonify(eval_related.judgements(seed))
+
+
+@app.route("/api/gold", methods=["POST"])
+def api_gold_mark():
+    """Record one mark: {seed: {tweet|url|q}, item: {tweet|url}, verdict:
+    relevant | not | clear}. Kept beside the settings, outside the repo."""
+    if not _same_origin():
+        return jsonify({"error": "marks can only be changed from Xplore itself"}), 403
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(eval_related.mark(body.get("seed") or {}, body.get("item") or {},
+                                         body.get("verdict") or ""))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
 
 @app.route("/api/facets")

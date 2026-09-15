@@ -898,3 +898,94 @@ send pages to the server on `localhost:8502`, and that server needs Python.
 - uninstall.
 
 The recommended order in §3 is now: A + B (done) → C1 → C2 → **H** → D → F.
+
+---
+
+## Supplement 6 — the tester package and C2 (15 September)
+
+### Tester package (a stopgap until H)
+
+- **`README.md` is rewritten for a tester:** what Xplore does, what leaves the computer, setup
+  step by step, first sync, archiving, using each part, topics, troubleshooting, updating.
+- **`requirements.txt`** is added.
+- **`package-for-tester.ps1`** zips the last **commit** with `git archive` (so no data can be in
+  it), leaves out the `HANDOFF*` notes, and refuses to build if anything data-like is inside.
+- **Verified on 15 Sep:** a fresh unzip (52 files, 1.3 MB) passes `test_parse.py`, starts in 3 s,
+  creates an empty `xbookmarks.db`, and every page and API answers 200. It contains no username,
+  account name or key.
+- Still needs Python on the tester's machine; H removes that.
+
+### C2: LLM-supported Related
+
+**Design, as the §C plan and the owner's decisions set it:**
+
+- **`providers.py`:**
+  - the provider list follows Compendium's `core/ai_client.py`: DeepSeek, Claude, GPT, Gemini,
+    Groq, Mistral, each with a fast and a quality model;
+  - plain HTTP, OpenAI-compatible, no SDK;
+  - keys live in `%USERPROFILE%\.xplore\config.json` or an environment variable, and are never
+    returned, logged or put in the page;
+  - every call's tokens and cost go to `ai_usage`, with a per-request and a daily cap (defaults
+    $0.02 and $0.50) at peak prices, so the recorded cost is an upper bound.
+  - **Claude is listed but unavailable:** its adapter should use the official `anthropic` SDK,
+    which is not installed. Ask the owner before installing.
+  - **Embeddings:** the design has a slot, but no provider fills it; DeepSeek has none.
+- **`ai_related.py`:**
+  - **Expand:** the model returns keywords, entities and other-language equivalents, with Greek
+    accents. They go back into C1 as extra words.
+  - **Re-rank:** the top 12 links and 24 bookmarks each get a relevance of 0–3 and a "why" of up
+    to 15 words.
+  - Both are cached in `ai_cache` by (seed, item, model).
+  - Any failure returns the C1 result with `ai.error`.
+- **`related.py`:** `extra_terms` are judged separately from the seed's own words, so they cannot
+  dilute them. They face the same commonness ceiling. Each link now carries its `key`.
+- **Server:**
+  - `GET/POST /api/settings` and `POST /api/settings/test`;
+  - `GET/POST /api/gold`;
+  - `/api/related?ai=1`.
+  - The POST routes refuse other origins, because the CORS rule for x.com must not reach them.
+- **UI:**
+  - **Settings** (the sliders button): provider, key, models, limits, today's spend, and
+    "Save and test".
+  - **Related drawer:** an **AI** switch, on by default when a key is set, then as last chosen.
+    The drawer shows C1 at once, then re-orders when the AI result arrives, with relevance dots,
+    a "why", dimmed "only shares words" items, and the cost or cache note. AI failures link to
+    Settings.
+  - **Marks:** ✓/✗ on each item in the expanded view.
+- **`eval_related.py`:**
+  - takes the owner's marks from `%USERPROFILE%\.xplore\gold.json` (personal data, outside the
+    repo);
+  - scores top-10 precision for `c1`, `expand` and `ai`;
+  - reports *judged* precision and *strict* precision (unjudged counted as not relevant).
+
+**Measured, 15 Sep, on the database copy with DeepSeek `deepseek-flash`:**
+
+- **Test suites:** 22/22 C2 checks. The C1 (23/23), API (61/61) and parser suites still pass.
+- **Cost and speed:** a fresh drawer costs $0.0008–0.0025 and takes 2.6–4.6 s. A reopened drawer
+  is served from cache in 0.3–0.9 s at no cost. The whole second test run spent $0.0054.
+- **The unaccented Greek query "τσιπρας":** C1 found 0 bookmarks; C2's expansion found 395, and
+  the re-rank put Tsipras's own post and Sanders meeting him at relevance 3.
+- **A Greek surveillance seed:** 36 items judged at relevance 2–3, with specific reasons (the
+  Predator scandal, Cyprus).
+- **A weak English seed:** its C1 candidates were poor, and the model rated them 0–1 honestly.
+
+**Trap: reasoning models spend the output allowance thinking.** `deepseek-flash` reasons by
+default. In a sample call, 271 of 319 output tokens were reasoning. Every re-rank and most
+expansions hit `max_tokens` (finish `length`), and identical retries tripled the cost ($0.024
+wasted).
+- Fixed with `"thinking": {"type": "disabled"}`, now a per-provider `quiet` setting in
+  `providers.py`, on by default. The same call then used 31 output tokens.
+- The retry rules now never repeat the same failing request: a cut-off reply gets double the
+  allowance once, within budget; an empty reply is retried once; a provider rejecting the switch
+  is retried once without it.
+
+**C2 gate status:**
+
+- **Key flow end to end:** met.
+- **Budget enforced:** met.
+- **"The gold set shows re-rank beating C1":** not yet. **It needs the owner's marks:** about 30
+  seeds, marking ✓/✗ in the expanded drawer. Then run `python eval_related.py`.
+- **Next for C2:**
+  - run the evaluation;
+  - tune the prompts or candidate counts if it doesn't beat C1;
+  - later, an embeddings slot if a key for OpenAI, Voyage or Gemini is added.

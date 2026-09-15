@@ -418,8 +418,45 @@ for it.
    Re-run `--assign` after syncs to classify new bookmarks. `python topics.py --show` prints how
    many bookmarks each topic has.
 
-Your own topic edits are never overwritten. A setting inside the app for the key and the AI
-provider is coming, with AI-assisted Related results.
+Your own topic edits are never overwritten.
+
+### AI in Related (optional)
+
+With an API key, **Related** gets smarter:
+
+- the AI looks for more than shared words: the people and places involved, the same names in
+  English and Greek, and different wordings of the same thing;
+- it then judges each result, marking how closely it's related (● to ●●●) with a short reason.
+
+**To set it up:**
+
+1. Click the **sliders button** at the top right of Xplore to open **AI settings**.
+2. Choose a provider (DeepSeek is the default and the only one tested) and paste your API key.
+   If you already set `DEEPSEEK_API_KEY` above, Xplore uses that and you can skip the key.
+3. Keep or change the spending limits: **per request** (default $0.02) and **per day** (default
+   $0.50). Xplore refuses any call that would go over either one.
+4. Click **Save and test**. You should see "Works", with the cost of the test, a tiny fraction of
+   a cent.
+
+**Using it:**
+
+- **The AI switch:** in any Related drawer, the **AI** button turns it on or off.
+  - The drawer first shows the ordinary results, then re-orders them a few seconds later with the
+    AI's judgement.
+  - Opening the same drawer again is instant and free, because results are remembered.
+  - A typical drawer costs about a fifth of a cent.
+- **Test set:** in **Show all**, each item has **✓** and **✗** buttons. Mark results as relevant
+  or not relevant; this is how you can check whether AI actually helps. After marking a good
+  number (say 30 bookmarks), run:
+
+  ```
+  python eval_related.py
+  ```
+
+  It compares plain Related with AI Related on your marks.
+
+Your key is saved in `%USERPROFILE%\.xplore\config.json` on your computer, and never appears in
+the app or its logs. Your marks are saved beside it in `gold.json`.
 
 ---
 

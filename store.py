@@ -453,6 +453,27 @@ class Store:
         # seed's distinctive words. A view over the index; it stores nothing.
         self.db.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS tweets_fts_vocab USING fts5vocab(tweets_fts, row)")
+        # C2: what the LLM said, so a drawer reopened costs nothing
+        # (ai_related.py), and what every call cost (providers.py).
+        self.db.executescript("""
+        CREATE TABLE IF NOT EXISTS ai_cache (
+            kind       TEXT NOT NULL,        -- expand | rerank
+            seed       TEXT NOT NULL,        -- t:<tweet id> | u:<page key> | q:<hash>
+            item       TEXT NOT NULL,        -- '' for expand; t:<id> or u:<key> for rerank
+            model      TEXT NOT NULL,
+            value      TEXT NOT NULL,        -- JSON
+            created_at TEXT,
+            PRIMARY KEY (kind, seed, item, model)
+        );
+        CREATE TABLE IF NOT EXISTS ai_usage (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            at            TEXT, day TEXT,     -- UTC
+            provider      TEXT, model TEXT, purpose TEXT,
+            input_tokens  INTEGER, cached_tokens INTEGER, output_tokens INTEGER,
+            cost_usd      REAL                -- at peak prices: an upper bound
+        );
+        CREATE INDEX IF NOT EXISTS idx_ai_usage_day ON ai_usage(day);
+        """)
         link_cols = {r[1] for r in self.db.execute("PRAGMA table_info(links)")}
         for name in ("resolved_url", "resolve_status", "resolved_at",
                      "article_date", "fetched_meta_at", "meta_status"):
