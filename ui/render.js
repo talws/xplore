@@ -1,5 +1,5 @@
 // render.js — markup shared by result cards and the detail panel.
-import { esc, highlight, snippetHtml, compact, num } from "./util.js";
+import { esc, highlight, snippetHtml, compact, num, fmtDay } from "./util.js";
 
 export const WORKLIST = new Set(["failed", "thin", "botscreen"]);
 
@@ -13,7 +13,7 @@ export function linkRow(l, T, opts = {}) {
   const readable = l.archive_status === "ok" || l.archive_status === "thin";
   const href = readable ? `/article?url=${encodeURIComponent(l.url)}` : l.url;
   const bits = [`<span class="host">${esc(l.host || "")}</span>`];
-  if (l.article_date) bits.push(`<span>${esc(l.article_date)}</span>`);
+  if (l.article_date) bits.push(`<span title="Publication date">published ${esc(fmtDay(l.article_date))}</span>`);
 
   if (l.archive_status === "ok") {
     bits.push(`<span class="st ok">${l.kind === "video" ? "transcript" : "archived"} · ${compact(l.words)} words</span>`);

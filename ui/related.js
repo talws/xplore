@@ -3,7 +3,7 @@
 // judges each item, and the drawer re-orders with a reason for each.
 // In the expanded view each item can be marked relevant or not: those marks are
 // the test set eval_related.py uses to check whether AI actually helps.
-import { esc, api, num, compact, relDate } from "./util.js";
+import { esc, api, num, compact, fmtDay, fmtDateTime } from "./util.js";
 import { openDetail } from "./detail.js";
 import { aiReady } from "./settings.js";
 
@@ -69,6 +69,9 @@ function linkItem(s, l) {
     bits.push(`<button class="st recover" data-recover="${esc(l.url)}" data-domain="${esc(l.host)}">recover →</button>`);
   }
   if (l.saved_by > 1) bits.push(`<span>in ${num(l.saved_by)} bookmarks</span>`);
+  // Publication date right after the site, where enrich_links.py found one
+  // (a calendar date, no time; about 60% of linked pages have it).
+  if (l.article_date) bits.splice(1, 0, `<span title="Publication date">published ${esc(fmtDay(l.article_date))}</span>`);
   const a = aiBits(l);
   return `<div class="ritem${a.cls}">
     ${judge(s, l.key, "url", l.url)}${a.mark}<a class="rtitle" href="${esc(href)}" target="_blank" rel="noopener"
@@ -84,8 +87,9 @@ function tweetItem(s, t) {
   return `<div class="ritem rtweet${a.cls}" data-open="${esc(t.id)}" tabindex="0" role="button" title="Open this bookmark">
     ${judge(s, "t:" + t.id, "tweet", t.id)}
     <div class="row1">${a.mark}<span class="rwho">${esc(t.author_name || "@" + t.author_handle)}</span>
-      <span class="handle">@${esc(t.author_handle || "")}</span>
-      <span class="when">· bookmarked ${esc(relDate(t.added_at))}</span></div>
+      <span class="handle">@${esc(t.author_handle || "")}</span></div>
+    <div class="rdates">posted <b>${esc(fmtDateTime(t.created_at))}</b>${t.added_at
+      ? ` · bookmarked <b>${esc(fmtDateTime(t.added_at))}</b>` : ""}</div>
     <div class="rtext">${esc(t.opener ?? t.text)}</div>
     ${a.why}
     <div class="rchips">${chips(t.related)}</div>${bar(t.related.score)}

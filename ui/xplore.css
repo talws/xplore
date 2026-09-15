@@ -407,6 +407,8 @@ button.pill:hover { border-color: var(--accent-line); color: var(--accent); }
 .rj.on { background: var(--ok); border-color: var(--ok); color: #fff; }
 .rj.no.on { background: var(--bad); border-color: var(--bad); color: #fff; }
 .rgold-note { font-size: 11px; color: var(--ink-3); margin: 2px 0 0; }
+.rdates { font-size: 11.5px; color: var(--ink-3); margin: 1px 0 2px; }
+.rdates b { font-weight: 550; color: var(--ink-2); }
 
 /* ── settings dialog ──────────────────────────────────────────────────── */
 #settings {
