@@ -43,7 +43,7 @@
 
   const S = {
     running: false, timer: null, auto: false, deep: false,
-    pages: 0, added: 0, updated: 0, dated: 0, barren: 0, failures: 0,
+    pages: 0, added: 0, updated: 0, dated: 0, barren: 0, failures: 0, empty: 0,
   };
 
   // Scheduling lives in the service worker now (chrome.alarms). A setTimeout
@@ -120,8 +120,12 @@
   // virtualised and only ~4-8 tweets exist in the DOM at once, so incremental
   // scrolling was measured not to drive it reliably.
   function nextDelay() {
-    if (!S.failures) return SCROLL_MS;
-    return Math.min(BACKOFF_BASE_MS * Math.pow(2, S.failures - 1), BACKOFF_MAX_MS);
+    // Empty pages count towards the backoff as well as towards the stop: both
+    // mean "x.com is not giving us anything", and answering that at full speed
+    // is how an account gets rate limited.
+    const n = S.failures + S.empty;
+    if (!n) return SCROLL_MS;
+    return Math.min(BACKOFF_BASE_MS * Math.pow(2, n - 1), BACKOFF_MAX_MS);
   }
 
   function step() {
@@ -133,6 +137,17 @@
     if (S.steps % 12 === 0)
       ask("scanlog", `scrolling · ${S.pages} pages · height ${document.body.scrollHeight}` +
                      ` · tab ${document.visibilityState}`);
+    // Half a minute of scrolling with nothing captured is not slowness, it is
+    // a broken run, and the panel used to sit there saying "running…" through
+    // all of it. Two causes, both worth naming while the owner is watching.
+    if (S.steps === 6 && S.pages === 0)
+      say(document.visibilityState === "hidden"
+        ? "no pages yet — this tab is hidden; X loads more only while it is visible"
+        : "no pages yet — X may have renamed the bookmarks call; see the server log");
+    // Two minutes of it means the run is dead. Keeping it scrolling produces
+    // x.com traffic for nothing, which is the one thing this tool must not do.
+    if (S.steps >= 24 && S.pages === 0)
+      return stop("nothing captured — stopping rather than scrolling for nothing");
     S.timer = setTimeout(step, nextDelay());
   }
 
@@ -141,7 +156,7 @@
     if (!onSyncPage()) return say("open x.com/i/history first");
     S.running = true;
     S.deep = !!deep;
-    S.pages = S.added = S.updated = S.dated = S.barren = S.failures = 0;
+    S.pages = S.added = S.updated = S.dated = S.barren = S.failures = S.empty = 0;
     if (btn) btn.textContent = "Stop";
     say(deep ? "deep scan — walking the whole timeline…" : "running…");
     step();
@@ -207,10 +222,17 @@
     if (!data.parsed) {
       // An empty timeline is what x.com returns when it begins rate limiting.
       // Reading that as "nothing new, carry on" would answer a rate limit with
-      // more requests, so it spends the failure budget instead.
-      if (++S.failures >= MAX_FAILURES) return stop("no data — likely rate limited");
-      return say(`empty response (${S.failures}/${MAX_FAILURES}) — backing off`);
+      // more requests, so it spends a budget instead.
+      //
+      // Counted separately from transport failures, because S.failures is
+      // reset to 0 a few lines above on every HTTP 200: this counter could
+      // never climb past 1, so the panel sat on "empty response (1/5)" and
+      // scrolled x.com for ever. On 25 November 2026, when a schema change
+      // made every page parse to nothing, that ran unbounded.
+      if (++S.empty >= MAX_FAILURES) return stop("no data — likely rate limited");
+      return say(`empty response (${S.empty}/${MAX_FAILURES}) — backing off`);
     }
+    S.empty = 0;
 
     // A deep run keeps walking while the server still holds undated bookmarks.
     // Re-walking the timeline to recover bookmark dates adds nothing, so
@@ -246,6 +268,13 @@
     else if (d.kind === "bookmarksEmpty") say(`X sent an empty bookmarks response (HTTP ${d.status})`);
     else if (d.kind === "threaddetail" && d.body) onThreadDetail(d.body);
     else if (d.kind === "ready") console.debug("[xbc] interceptor ready");
+    // What the page world saw: which operation is being captured, which were
+    // ignored, and anything it could not read. Only on the pages where a run
+    // happens, so ordinary browsing does not write to the log. Without this a
+    // renamed operation is invisible -- it cost a whole scan on 25 Nov 2026.
+    else if (d.kind === "diag" && (onSyncPage() || S.running || threadMine))
+      ask("scanlog", "[page] " + d.msg);
+    else if (d.kind === "error") ask("scanlog", "[page] " + d.message);
   });
 
   // ── thread pass ────────────────────────────────────────────────────────────
