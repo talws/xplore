@@ -91,13 +91,33 @@ def _unwrap(result: Any) -> dict | None:
     return result
 
 
+def _iso_ms(ms: Any) -> str | None:
+    """Epoch milliseconds -> ISO8601 UTC. `details.created_at_ms` since Nov 2026."""
+    try:
+        return datetime.datetime.fromtimestamp(int(ms) / 1000, datetime.timezone.utc)\
+                       .isoformat(timespec="seconds").replace("+00:00", "Z")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
 def _is_tweet(d: dict) -> bool:
+    """Does this look like a tweet, in either payload shape?
+
+    x.com rebuilt the Bookmarks response in November 2026: the text and the
+    timestamp moved out of `legacy` into `details`, and `legacy` kept only four
+    fields (conversation id, entities, lang, possibly_sensitive). Insisting on
+    `legacy.full_text` rejected every tweet on every page -- a scan captured 19
+    pages and stored nothing from any of them, while the panel reported
+    "empty response" as though x.com were throttling.
+    """
+    if not d.get("rest_id"):
+        return False
+    details = d.get("details")
+    if isinstance(details, dict) and ("full_text" in details or "created_at_ms" in details):
+        return True
     legacy = d.get("legacy")
-    return bool(
-        d.get("rest_id")
-        and isinstance(legacy, dict)
-        and ("full_text" in legacy or "created_at" in legacy)
-    )
+    return bool(isinstance(legacy, dict)
+                and ("full_text" in legacy or "created_at" in legacy))
 
 
 def _author(tweet: dict) -> tuple[str | None, str | None, str | None]:
@@ -137,25 +157,47 @@ def _full_text(tweet: dict, legacy: dict) -> tuple[str, bool]:
         if isinstance(node, str) and node.strip():
             return node, False
 
-    text = legacy.get("full_text") or ""
+    # `details.full_text` since November 2026, `legacy.full_text` before it.
+    text = (tweet.get("details") or {}).get("full_text") or legacy.get("full_text") or ""
     # X marks its own truncation; the ellipsis check catches the rest.
     truncated = bool(legacy.get("truncated")) or text.endswith("…")
     return text, truncated
 
 
-def _entities(legacy: dict) -> tuple[list[dict], list[dict], list[str]]:
-    """(links, media, hashtags) from a tweet's entity blocks."""
+def _entities(tweet: dict, legacy: dict) -> tuple[list[dict], list[dict], list[str]]:
+    """(links, media, hashtags) from a tweet's entity blocks.
+
+    Two shapes, both read, so a payload stored under either era replays the
+    same way. Until November 2026 all of this hung off `legacy.entities`; now
+    links are `url_entities`, media are `media_entities2` and hashtags are
+    `details.hashtag_entities`, all at the top level of the tweet.
+
+    A long post's links appear ONLY inside the note's entity set -- they are
+    absent from `url_entities` -- so that block is read too. Links are the
+    whole point of the archiver, and missing them on long posts would be a
+    quiet loss rather than a visible failure.
+    """
     ent = legacy.get("entities") or {}
+    details = tweet.get("details") or {}
+    note_result = (((tweet.get("note_tweet") or {}).get("note_tweet_results") or {})
+                   .get("result") or {})
+    note_urls = (note_result.get("entity_set") or {}).get("urls") or []
 
     links = []
-    for u in ent.get("urls") or []:
+    seen_links: set[str] = set()
+    for u in (list(tweet.get("url_entities") or [])
+              + list(ent.get("urls") or [])
+              + list(note_urls)):
+        if not isinstance(u, dict):
+            continue
         expanded = u.get("expanded_url") or u.get("url")
-        if not expanded:
+        if not expanded or expanded in seen_links:
             continue
         # Quote-tweet permalinks show up as ordinary URLs; they are not
         # outbound links and archiving them would just re-fetch x.com.
         if re.match(r"https?://(www\.)?(x|twitter)\.com/", expanded):
             continue
+        seen_links.add(expanded)
         links.append({
             "url": u.get("url"),
             "expanded_url": expanded,
@@ -165,8 +207,12 @@ def _entities(legacy: dict) -> tuple[list[dict], list[dict], list[str]]:
     # extended_entities carries the full media set; entities.media is a subset.
     media = []
     seen_media: set[str] = set()
-    for block in (legacy.get("extended_entities") or {}, ent):
-        for m in block.get("media") or []:
+    for block in (tweet.get("media_entities2") or [],
+                  (legacy.get("extended_entities") or {}).get("media") or [],
+                  ent.get("media") or []):
+        for m in block:
+            if not isinstance(m, dict):
+                continue
             url = m.get("media_url_https") or m.get("media_url")
             if not url or url in seen_media:
                 continue
@@ -177,7 +223,11 @@ def _entities(legacy: dict) -> tuple[list[dict], list[dict], list[str]]:
                 "alt": m.get("ext_alt_text") or (m.get("alt_text") or None),
             })
 
-    hashtags = [h.get("text") for h in (ent.get("hashtags") or []) if h.get("text")]
+    hashtags: list[str] = []
+    for h in (list(details.get("hashtag_entities") or []) + list(ent.get("hashtags") or [])):
+        tag = h.get("text") if isinstance(h, dict) else None
+        if tag and tag not in hashtags:
+            hashtags.append(tag)
     return links, media, hashtags
 
 
@@ -208,29 +258,37 @@ def parse_tweet(tweet: dict) -> dict | None:
     tweet = _unwrap(tweet) or tweet
     if not _is_tweet(tweet):
         return None
-    legacy = tweet["legacy"]
+    # `legacy` is optional since November 2026 and absent on some tweets.
+    legacy = tweet.get("legacy") or {}
+    details = tweet.get("details") or {}
+    counts = tweet.get("counts") or {}
     tid = str(tweet["rest_id"])
 
     handle, name, uid = _author(tweet)
     text, truncated = _full_text(tweet, legacy)
-    links, media, hashtags = _entities(legacy)
+    links, media, hashtags = _entities(tweet, legacy)
 
     card = _card_link(tweet)
     if card and not any(l["expanded_url"] == card["expanded_url"] for l in links):
         links.append(card)
 
     quoted_id = quoted_handle = quoted_text = None
-    q = _unwrap((tweet.get("quoted_status_result") or {}).get("result"))
+    # `quoted_tweet_results` is the November 2026 name for `quoted_status_result`.
+    q = _unwrap((tweet.get("quoted_tweet_results")
+                 or tweet.get("quoted_status_result") or {}).get("result"))
     if q and _is_tweet(q):
         quoted_id = str(q["rest_id"])
         quoted_handle, _, _ = _author(q)
-        quoted_text, _ = _full_text(q, q["legacy"])
+        quoted_text, _ = _full_text(q, q.get("legacy") or {})
 
     # A bookmark that is itself a reply, or that opens a conversation with more
     # in it, is worth flagging for the later thread pass. Cheap heuristic; the
-    # pass itself confirms.
+    # pass itself confirms. `reply_to_results` replaced
+    # `legacy.in_reply_to_status_id_str`, which no longer appears at all.
     is_thread = bool(
-        legacy.get("in_reply_to_status_id_str")
+        tweet.get("reply_to_results")
+        or tweet.get("reply_to_user_results")
+        or legacy.get("in_reply_to_status_id_str")
         or (legacy.get("conversation_id_str")
             and str(legacy["conversation_id_str"]) != tid)
     )
@@ -241,17 +299,18 @@ def parse_tweet(tweet: dict) -> dict | None:
         "author_handle": handle,
         "author_name": name,
         "author_id": uid,
-        "created_at": _iso(legacy.get("created_at")),
+        "created_at": _iso_ms(details.get("created_at_ms")) or _iso(legacy.get("created_at")),
         "text": text,
-        "lang": legacy.get("lang"),
+        "lang": legacy.get("lang") or details.get("lang"),
         "truncated": truncated,
         "is_thread": is_thread,
         "quoted_id": quoted_id,
         "quoted_handle": quoted_handle,
         "quoted_text": quoted_text,
-        "reply_count": legacy.get("reply_count"),
-        "retweet_count": legacy.get("retweet_count"),
-        "like_count": legacy.get("favorite_count"),
+        # Engagement moved to its own `counts` block.
+        "reply_count": counts.get("reply_count", legacy.get("reply_count")),
+        "retweet_count": counts.get("retweet_count", legacy.get("retweet_count")),
+        "like_count": counts.get("favorite_count", legacy.get("favorite_count")),
         "source": "graphql",
         "media": media,
         "links": links,
@@ -262,11 +321,12 @@ def parse_tweet(tweet: dict) -> dict | None:
 def find_cursor(payload: Any) -> str | None:
     """The 'Bottom' cursor, i.e. where the next page starts."""
     for d in _walk(payload):
-        if d.get("cursorType") == "Bottom" and isinstance(d.get("value"), str):
+        # `cursor_type` is the November 2026 spelling of `cursorType`.
+        kind = d.get("cursor_type") or d.get("cursorType")
+        if kind == "Bottom" and isinstance(d.get("value"), str):
             return d["value"]
         # Some responses only tag the entry, not the inner content.
-        if d.get("entryType") == "TimelineTimelineCursor" \
-                and d.get("cursorType") == "Bottom":
+        if d.get("entryType") == "TimelineTimelineCursor" and kind == "Bottom":
             return d.get("value")
     return None
 
@@ -323,7 +383,8 @@ def is_end_of_timeline(payload: Any) -> bool:
     looked like "no tweets found" and spent the failure budget.
     """
     for d in _walk(payload):
-        if d.get("cursorType") == "Bottom" and d.get("stopOnEmptyResponse"):
+        if (d.get("cursor_type") or d.get("cursorType")) == "Bottom" \
+                and (d.get("stop_on_empty_response") or d.get("stopOnEmptyResponse")):
             return True
     return False
 
@@ -361,7 +422,9 @@ def parse_bookmarks_response(payload: Any) -> tuple[list[dict], str | None]:
     # the tweet it bookmarks. sort_index is kept either way, so dates can be
     # recomputed without re-reading anything from x.com.
     for d in _walk(payload):
-        eid, si = d.get("entryId"), d.get("sortIndex")
+        # `entry_id` / `sort_index` since November 2026; the encoding is the same.
+        eid = d.get("entry_id") or d.get("entryId")
+        si = d.get("sort_index") if d.get("sort_index") is not None else d.get("sortIndex")
         if not (isinstance(eid, str) and eid.startswith("tweet-") and si is not None):
             continue
         rec = records.get(eid[len("tweet-"):])
